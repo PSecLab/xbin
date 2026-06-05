@@ -1,0 +1,31 @@
+version: '3.8'
+
+services:
+  redis-blackboard:
+    image: redis:alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - xbin-net
+
+  orchestrator:
+    build: 
+      context: .
+      dockerfile: core/orchestrator/Dockerfile
+    environment:
+      - REDIS_HOST=redis-blackboard
+      - XBIN_PLUGINS_DIR=plugins
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - .:/app
+    ports:
+      - "50051:50051" # gRPC Worker Port
+      - "8000:8000"   # Agentic REST API Port
+    depends_on:
+      - redis-blackboard
+    networks:
+      - xbin-net
+
+networks:
+  xbin-net:
+    driver: bridge

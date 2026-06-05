@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0", "grpcio-tools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xbin-orchestrator"
+version = "0.2.0"
+description = "A blackboard-style orchestrator for binary analysis workers"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    { name = "xbin developers" }
+]
+dependencies = [
+    "grpcio>=1.62.0",
+    "grpcio-tools>=1.62.0",
+    "redis==5.0.1",
+    "fastapi==0.104.1",
+    "uvicorn==0.24.0",
+    "requests==2.31.0",
+    "python-multipart==0.0.6",
+]
+
+[project.scripts]
+xbin-orchestrator = "xbin_orchestrator.main:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

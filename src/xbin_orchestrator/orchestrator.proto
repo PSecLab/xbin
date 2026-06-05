@@ -1,0 +1,40 @@
+syntax = "proto3";
+package orchestrator;
+
+service OrchestratorService {
+  rpc RegisterWorker(RegisterRequest) returns (RegisterResponse);
+  rpc PostResult(PostResultRequest) returns (PostResultResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+message RegisterRequest {
+  string worker_id = 1;
+  string backend_name = 2;
+  string analysis_type = 3;
+}
+
+message RegisterResponse {
+  bool success = 1;
+}
+
+message HeartbeatRequest {
+  string worker_id = 1;
+  string status_message = 2; // e.g., "Ready", "Processing binary X"
+}
+
+message HeartbeatResponse {
+  bool acknowledged = 1;
+}
+
+message PostResultRequest {
+  string analysis_type = 1;
+  string item_key = 2;
+  string result_data = 3;
+  float confidence = 4;
+  string backend_name = 5;
+}
+
+message PostResultResponse {
+  bool accepted = 1;
+  string current_status = 2;
+}
