@@ -14,7 +14,7 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Install latest stable angr
-RUN pip install --no-cache-dir angr requests
+RUN pip install --no-cache-dir unicorn angr requests
 
 # Copy xbin SDK
 COPY pyproject.toml README.md ./
