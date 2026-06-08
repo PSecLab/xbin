@@ -45,12 +45,9 @@ pip install .
 
 ## 👩‍💻 How to Add Your Own Tool
 
-The `xbin` SDK makes it trivial to wrap any analysis script into a containerized worker.
+The `xbin` SDK makes it trivial to wrap any analysis script into a containerized worker. For a detailed guide and a "Hello World" example, see the **[SDK Reference Guide](docs/sdk_reference.md)**.
 
-### 1. Write the Worker (Analyzer or Validator)
-Create a Python file using the `@xbin.plugin` decorator:
-
-#### As an Analyzer (Producer)
+### 1. Write the Worker (Quick Example)
 ```python
 import xbin
 
@@ -59,19 +56,9 @@ class MyAnalyzer:
     def on_new_binary(self, binary_path, requested_goals):
         from xbin.sdk import _current_worker
         _current_worker.post_result(item_key="0x401000", data="main", confidence=0.9)
-```
 
-#### As a Validator (Verifier)
-```python
-import xbin
-
-@xbin.plugin(name="my_validator", category="symbol_matching", is_validator=True)
-class MyValidator:
-    def on_update(self, category, item_key, new_hypothesis, top_hypothesis):
-        if top_hypothesis['data'] == "main":
-            from xbin.sdk import _current_worker
-            # Vouch for the top hypothesis instead of posting new data
-            _current_worker.post_validation(item_key=item_key, target_id="TOP")
+if __name__ == "__main__":
+    xbin.start_worker()
 ```
 
 ### 2. Containerize It
@@ -80,34 +67,13 @@ Add a simple `Dockerfile` in your tool's directory:
 ```dockerfile
 FROM python:3.11-slim
 WORKDIR /app
-RUN pip install xbin-orchestrator  # Or copy local src
+RUN pip install xbin-orchestrator
 COPY . .
 CMD ["python", "my_worker.py"]
 ```
 
 ### 3. Register
 Drop your folder into `plugins/<category>/`. The orchestrator will automatically find it and show a **Start** button on the dashboard.
-
-## 🛠️ SDK Reference
-
-The `xbin` SDK is reactive. Your plugin class can implement the following callbacks:
-
-### Callbacks
-- **`on_new_binary(self, binary_path, requested_goals)`**: 
-  - Triggered when a new binary is uploaded. 
-  - `binary_path`: Path to the file.
-  - `requested_goals`: List of categories (e.g. `['cfg_generation']`).
-- **`on_update(self, category, item_key, new_hypothesis, top_hypothesis)`**: 
-  - Triggered on any blackboard change.
-  - `category`: The blackboard being updated.
-  - `item_key`: The specific address or item.
-  - `new_hypothesis`: The data that was just posted.
-  - `top_hypothesis`: The current consensus leader.
-
-### Methods (via `xbin.sdk._current_worker`)
-- **`post_result(item_key, data, confidence)`**: Submit new analysis findings.
-- **`post_validation(item_key, target_id="TOP", confidence=1.0)`**: Vouch for an existing finding (Validators only).
-- **`get_analysis(category, item_key=None)`**: Manually pull current blackboard state.
 
 ## 📡 The RPC Scheme
 
