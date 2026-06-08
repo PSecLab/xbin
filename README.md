@@ -88,6 +88,27 @@ CMD ["python", "my_worker.py"]
 ### 3. Register
 Drop your folder into `plugins/<category>/`. The orchestrator will automatically find it and show a **Start** button on the dashboard.
 
+## 🛠️ SDK Reference
+
+The `xbin` SDK is reactive. Your plugin class can implement the following callbacks:
+
+### Callbacks
+- **`on_new_binary(self, binary_path, requested_goals)`**: 
+  - Triggered when a new binary is uploaded. 
+  - `binary_path`: Path to the file.
+  - `requested_goals`: List of categories (e.g. `['cfg_generation']`).
+- **`on_update(self, category, item_key, new_hypothesis, top_hypothesis)`**: 
+  - Triggered on any blackboard change.
+  - `category`: The blackboard being updated.
+  - `item_key`: The specific address or item.
+  - `new_hypothesis`: The data that was just posted.
+  - `top_hypothesis`: The current consensus leader.
+
+### Methods (via `xbin.sdk._current_worker`)
+- **`post_result(item_key, data, confidence)`**: Submit new analysis findings.
+- **`post_validation(item_key, target_id="TOP", confidence=1.0)`**: Vouch for an existing finding (Validators only).
+- **`get_analysis(category, item_key=None)`**: Manually pull current blackboard state.
+
 ## 📡 The RPC Scheme
 
 We use a generalized schema to support any type of analysis without changing the core protocol.
