@@ -6,6 +6,7 @@ import time
 import subprocess
 import shutil
 import hashlib
+import sys
 
 import grpc
 import redis
@@ -13,12 +14,15 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, F
 from fastapi.responses import HTMLResponse
 import uvicorn
 
+# Fix gRPC relative import issues when installed as a package
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 try:
-    from . import orchestrator_pb2
-    from . import orchestrator_pb2_grpc
-except (ImportError, ValueError):
     import orchestrator_pb2
     import orchestrator_pb2_grpc
+except (ImportError, ValueError):
+    from . import orchestrator_pb2
+    from . import orchestrator_pb2_grpc
 
 # ==========================================
 # CONFIGURATION
@@ -152,6 +156,18 @@ def list_available_plugins():
             state_str = r.get(f"xbin:plugin_state:{name}")
             saved = json.loads(state_str) if state_str else {"status": "STOPPED"}
             status = saved["status"]
+            
+            # Static discovery: Check if is_validator=True in source files
+            is_validator = saved.get("is_validator", False)
+            if not is_validator:
+                for f in files:
+                    if f.endswith(".py"):
+                        try:
+                            with open(os.path.join(root, f), "r") as pf:
+                                if "is_validator=True" in pf.read():
+                                    is_validator = True; break
+                        except: pass
+
             if unique_id in docker_data:
                 d = docker_data[unique_id]
                 status = "RUNNING" if d["state"] == "running" else "CRASHED" if "Exited (0)" not in d["status"] else "STOPPED"
@@ -160,7 +176,9 @@ def list_available_plugins():
                 w_data = json.loads(w_val)
                 if w_data.get("backend") == name:
                     last_beat = w_data["last_heartbeat"]; health_status = "HEALTHY" if (now - last_beat) < 10 else "DEAD"
-            available.append({"name": name, "category": category, "status": status, "health": health_status, "last_beat": last_beat, "error": saved.get("error")})
+                    # Registration-time status takes precedence if active
+                    if "is_validator" in w_data: is_validator = w_data["is_validator"]
+            available.append({"name": name, "category": category, "status": status, "health": health_status, "last_beat": last_beat, "error": saved.get("error"), "is_validator": is_validator})
     return {"plugins": available}
 
 def bg_start_plugin(name: str, category: str):
@@ -243,6 +261,7 @@ def dashboard():
             .ping-active { animation: pulse-ping 1.2s ease-out; }
             .badge { padding: 0.2rem 0.5rem; border-radius: 99px; font-size: 0.6rem; font-weight: 800; text-transform: uppercase; }
             .badge-running { background: rgba(16, 185, 129, 0.1); color: var(--success); }
+            .badge-validator { background: rgba(139, 92, 246, 0.1); color: #a78bfa; border: 1px solid rgba(139, 92, 246, 0.3); }
             .badge-wait { background: rgba(245, 158, 11, 0.1); color: var(--warning); animation: blink 1.5s infinite; }
             @keyframes blink { 50% { opacity: 0.5; } }
             table { width: 100%; border-collapse: collapse; }
@@ -432,7 +451,7 @@ def dashboard():
                         html += `<div style="display:flex; justify-content:space-between; align-items:center; margin:1.5rem 0 0.5rem;"><div style="font-size:0.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.1em; font-weight:700;">${cat.replace('_',' ')}</div><div style="display:flex; gap:0.25rem"><button class="btn btn-action" onclick="bulkAction('stop', '${cat}')">Stop</button><button class="btn btn-primary btn-action" onclick="bulkAction('start', '${cat}')">Start</button></div></div>`;
                         cats[cat].forEach(p => {
                             const isNewBeat = p.last_beat > (lastHeartbeats[p.name] || 0);
-                            html += `<div class="plugin-item" id="card-${p.name}"><div id="beat-${p.name}" class="heartbeat-ping ${isNewBeat ? 'ping-active' : ''}"></div><div style="display:flex; justify-content:space-between; align-items:start"><div><div style="font-weight:bold">${p.name}</div><div style="display:flex; align-items:center; gap:0.3rem; margin-top:0.2rem"><div class="badge badge-${p.status==='RUNNING'?'running':p.status==='STOPPED'?'stopped':'error'}">${p.status}</div>${p.health==='HEALTHY'?'<span style="color:var(--success); font-size:0.6rem; font-weight:bold">READY</span>':''}</div></div><div style="display:flex; flex-direction:column; gap:0.2rem"><button class="btn btn-action ${p.status==='RUNNING'?'btn-danger':'btn-primary'}" onclick="toggle('${p.name}','${p.category}','${p.status}')">${p.status==='RUNNING'?'Stop':'Start'}</button><button class="btn btn-action" style="background:#2d3748" onclick="showLogs('${p.name}','${p.category}')">Logs</button></div></div>${p.error ? `<div style="font-size:0.6rem; color:var(--danger); margin-top:0.3rem; border-top:1px solid rgba(239,68,68,0.1); padding-top:0.2rem">${p.error}</div>` : ''}</div>`;
+                            html += `<div class="plugin-item" id="card-${p.name}"><div id="beat-${p.name}" class="heartbeat-ping ${isNewBeat ? 'ping-active' : ''}"></div><div style="display:flex; justify-content:space-between; align-items:start"><div><div style="font-weight:bold">${p.name}</div><div style="display:flex; align-items:center; gap:0.3rem; margin-top:0.2rem"><div class="badge badge-${p.status==='RUNNING'?'running':p.status==='STOPPED'?'stopped':'error'}">${p.status}</div>${p.is_validator ? '<div class="badge badge-validator">Validator</div>' : ''}${p.health==='HEALTHY'?'<span style="color:var(--success); font-size:0.6rem; font-weight:bold">READY</span>':''}</div></div><div style="display:flex; flex-direction:column; gap:0.2rem"><button class="btn btn-action ${p.status==='RUNNING'?'btn-danger':'btn-primary'}" onclick="toggle('${p.name}','${p.category}','${p.status}')">${p.status==='RUNNING'?'Stop':'Start'}</button><button class="btn btn-action" style="background:#2d3748" onclick="showLogs('${p.name}','${p.category}')">Logs</button></div></div>${p.error ? `<div style="font-size:0.6rem; color:var(--danger); margin-top:0.3rem; border-top:1px solid rgba(239,68,68,0.1); padding-top:0.2rem">${p.error}</div>` : ''}</div>`;
                             if (isNewBeat) lastHeartbeats[p.name] = p.last_beat;
                         });
                     }
@@ -447,8 +466,11 @@ def dashboard():
                             let tableHtml = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;"><h2>${cat.replace('_',' ')}</h2><div style="display:flex; gap:0.5rem;"><button class="btn btn-action" onclick="showBlackboardLogs('${cat}')">Audit Trail</button>${cat==='function_boundary'?'<button class="btn btn-primary btn-action" onclick=\\'visualizeBoundaries('+JSON.stringify(d.results)+')\\'>View Map</button>':''}</div></div><table><thead><tr><th>${cat==='function_boundary'?'Address':'Target'}</th><th>${cat==='function_boundary'?'End / Size':'Result'}</th><th>Action</th></tr></thead><tbody>`;
                             for(let k in d.results) { 
                                 const item = d.results[k]; const top = item.hypotheses[0];
+                                const validators = top.validators || [];
+                                const vCount = validators.length;
                                 let resText = cat === 'function_boundary' ? `${top.data.end} (${top.data.size}b)` : (typeof top.data === 'string' ? top.data : JSON.stringify(top.data).substring(0,30)+'...');
-                                tableHtml += `<tr class="bb-row"><td><code>${k}</code></td><td style="color:var(--accent); font-weight:500;">${resText}</td><td>${cat==='cfg_generation'?'<button class="btn btn-primary btn-action" onclick="showConsensus(\\''+cat+'\\',\\''+k+'\\')">Visual Graph</button>':''} <span style="font-size:0.6rem; color:var(--muted)">via ${top.backend}</span></td></tr>`; 
+                                const vList = vCount ? `Vouched by: ${validators.join(', ')}` : 'No validations yet';
+                                tableHtml += `<tr class="bb-row"><td><code>${k}</code></td><td style="color:var(--accent); font-weight:500;">${vCount ? '<span style="color:var(--success); margin-right:0.3rem;" title="'+vList+'">✓</span>' : ''}${resText}</td><td>${cat==='cfg_generation'?'<button class="btn btn-primary btn-action" onclick="showConsensus(\\''+cat+'\\',\\''+k+'\\')">Visual Graph</button>':''} <span style="font-size:0.6rem; color:var(--muted)">via ${top.backend}${vCount ? ` <span style="color:var(--success); cursor:help;" title="${vList}">+${vCount} vouches</span>` : ''} (Score: ${top.score})</span></td></tr>`; 
                             }
                             tableHtml += '</tbody></table>';
                             if (section.innerHTML !== tableHtml) { section.innerHTML = tableHtml; section.style.animation = 'glow-pulse 0.5s ease-out'; }
@@ -468,8 +490,20 @@ def dashboard():
 class XbinOrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServiceServicer):
     def RegisterWorker(self, request, context):
         r.hset("xbin:active_workers", request.worker_id, f"{request.analysis_type}:{request.backend_name}")
-        r.hset("xbin:worker_health", request.worker_id, json.dumps({"backend": request.backend_name, "last_heartbeat": time.time(), "message": "Welcome Signal Received"}))
-        sys_log(f"Handshake: {request.worker_id}")
+        r.hset("xbin:worker_health", request.worker_id, json.dumps({
+            "backend": request.backend_name, 
+            "last_heartbeat": time.time(), 
+            "message": "Welcome Signal Received",
+            "is_validator": request.is_validator
+        }))
+        
+        # Persist validator status in long-term plugin state
+        state_key = f"xbin:plugin_state:{request.backend_name}"
+        state = json.loads(r.get(state_key)) if r.exists(state_key) else {"status": "RUNNING"}
+        state["is_validator"] = request.is_validator
+        r.set(state_key, json.dumps(state))
+
+        sys_log(f"Handshake: {request.worker_id} {'[VALIDATOR]' if request.is_validator else ''}")
         return orchestrator_pb2.RegisterResponse(success=True)
 
     def Heartbeat(self, request, context):
@@ -483,26 +517,75 @@ class XbinOrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServiceServicer
         bb_key = f"xbin:bb:{cat}:{request.item_key}"
         weight = BACKEND_WEIGHTS.get(request.backend_name, 0.50)
         timestamp = time.strftime("%H:%M:%S")
-        log_entry = f"[{timestamp}] {request.backend_name} -> {request.item_key} (Conf: {request.confidence})"
         audit_key = f"xbin:bb_logs:{cat}"
-        r.lpush(audit_key, log_entry)
-        r.ltrim(audit_key, 0, 100)
-        sys_log(f"Audit entry added to {audit_key}")
-        new_hyp = {
-            "data": json.loads(request.result_data), 
-            "score": round(request.confidence * weight, 3), 
-            "raw_conf": round(request.confidence, 3),
-            "backend": request.backend_name
-        }
+        
         state = json.loads(r.get(bb_key)) if r.exists(bb_key) else {"status": "PENDING", "hypotheses": []}
-        state["hypotheses"].append(new_hyp); state["hypotheses"] = sorted(state["hypotheses"], key=lambda x: x["score"], reverse=True)
+        
+        # 1. Handle Validation (Vouching)
+        if request.validation_target_id:
+            target_hyp = None
+            if request.validation_target_id == "TOP":
+                if state["hypotheses"]: target_hyp = state["hypotheses"][0]
+            else:
+                for hyp in state["hypotheses"]:
+                    if hyp.get("id") == request.validation_target_id:
+                        target_hyp = hyp
+                        break
+            
+            if target_hyp:
+                if request.backend_name not in target_hyp.setdefault("validators", []) and request.backend_name != target_hyp["backend"]:
+                    target_hyp["validators"].append(request.backend_name)
+                    target_hyp["score"] = round(target_hyp["score"] + (request.confidence * weight), 3)
+                    log_entry = f"[{timestamp}] {request.backend_name} VOUCHED for {request.item_key} (ID: {target_hyp.get('id')})"
+                    r.lpush(audit_key, log_entry); r.ltrim(audit_key, 0, 100)
+                    sys_log(f"Validation: {request.backend_name} -> {request.item_key}")
+                new_hyp = target_hyp # For the event broadcast
+            else:
+                return orchestrator_pb2.PostResultResponse(accepted=False, current_status="TARGET_NOT_FOUND")
+        
+        # 2. Handle New Data Submission
+        else:
+            data = json.loads(request.result_data)
+            hyp_id = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
+            
+            # Deduplication: Check if this data already exists as a hypothesis
+            existing = next((h for h in state["hypotheses"] if h.get("id") == hyp_id), None)
+            if existing:
+                if request.backend_name not in existing.setdefault("validators", []) and request.backend_name != existing["backend"]:
+                    existing["validators"].append(request.backend_name)
+                    existing["score"] = round(existing["score"] + (request.confidence * weight), 3)
+                new_hyp = existing
+            else:
+                new_hyp = {
+                    "id": hyp_id,
+                    "data": data, 
+                    "score": round(request.confidence * weight, 3), 
+                    "raw_conf": round(request.confidence, 3),
+                    "backend": request.backend_name,
+                    "validators": []
+                }
+                state["hypotheses"].append(new_hyp)
+                log_entry = f"[{timestamp}] {request.backend_name} -> {request.item_key} (New Hypothesis)"
+                r.lpush(audit_key, log_entry); r.ltrim(audit_key, 0, 100)
+
+        # Re-sort and determine status
+        state["hypotheses"] = sorted(state["hypotheses"], key=lambda x: x["score"], reverse=True)
         status = "RESOLVED"
         if len(state["hypotheses"]) > 1:
             if state["hypotheses"][0]["data"] != state["hypotheses"][1]["data"] and (state["hypotheses"][0]["score"] - state["hypotheses"][1]["score"]) <= MARGIN_THRESHOLD:
                 status = "CONFLICTED"
-        state["status"] = status; r.set(bb_key, json.dumps(state))
-        sys_log(f"Update [{cat}]: {request.item_key}")
-        r.publish("xbin:events", json.dumps({"type": "BLACKBOARD_UPDATE", "analysis_type": cat, "item_key": request.item_key, "new_hypothesis": new_hyp, "top_hypothesis": state["hypotheses"][0], "status": status}))
+        
+        state["status"] = status
+        r.set(bb_key, json.dumps(state))
+        
+        r.publish("xbin:events", json.dumps({
+            "type": "BLACKBOARD_UPDATE", 
+            "analysis_type": cat, 
+            "item_key": request.item_key, 
+            "new_hypothesis": new_hyp, 
+            "top_hypothesis": state["hypotheses"][0], 
+            "status": status
+        }))
         return orchestrator_pb2.PostResultResponse(accepted=True, current_status=status)
 
 def main():

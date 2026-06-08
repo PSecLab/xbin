@@ -3,12 +3,9 @@
 import grpc
 import warnings
 
-try:
-    from . import orchestrator_pb2 as orchestrator__pb2
-except (ImportError, ValueError):
-    import orchestrator_pb2 as orchestrator__pb2
+import orchestrator_pb2 as orchestrator__pb2
 
-GRPC_GENERATED_VERSION = '1.76.0'
+GRPC_GENERATED_VERSION = '1.81.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -28,7 +25,7 @@ if _version_not_supported:
     )
 
 
-class OrchestratorServiceStub(object):
+class OrchestratorServiceStub:
     """Missing associated documentation comment in .proto file."""
 
     def __init__(self, channel):
@@ -54,7 +51,7 @@ class OrchestratorServiceStub(object):
                 _registered_method=True)
 
 
-class OrchestratorServiceServicer(object):
+class OrchestratorServiceServicer:
     """Missing associated documentation comment in .proto file."""
 
     def RegisterWorker(self, request, context):
@@ -101,7 +98,7 @@ def add_OrchestratorServiceServicer_to_server(servicer, server):
 
 
  # This class is part of an EXPERIMENTAL API.
-class OrchestratorService(object):
+class OrchestratorService:
     """Missing associated documentation comment in .proto file."""
 
     @staticmethod

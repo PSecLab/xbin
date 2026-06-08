@@ -11,6 +11,7 @@ message RegisterRequest {
   string worker_id = 1;
   string backend_name = 2;
   string analysis_type = 3;
+  bool is_validator = 4; // NEW: Distinguish between data producers and validators
 }
 
 message RegisterResponse {
@@ -19,7 +20,7 @@ message RegisterResponse {
 
 message HeartbeatRequest {
   string worker_id = 1;
-  string status_message = 2; // e.g., "Ready", "Processing binary X"
+  string status_message = 2;
 }
 
 message HeartbeatResponse {
@@ -32,6 +33,10 @@ message PostResultRequest {
   string result_data = 3;
   float confidence = 4;
   string backend_name = 5;
+  
+  // NEW: Validators can target a specific hypothesis ID (e.g. hash of the data) 
+  // or just vouch for the current top result
+  string validation_target_id = 6; 
 }
 
 message PostResultResponse {

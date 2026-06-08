@@ -21,7 +21,9 @@ try:
 except Exception as e:
     print(f"[*] Local stub fallback (Error: {e})")
     import sys
-    sys.path.append(os.path.join(os.path.dirname(__file__), "..", "xbin_orchestrator"))
+    # Add both the parent and the specific directory to path to satisfy gRPC's flat imports
+    target_dir = os.path.join(os.path.dirname(__file__), "..", "xbin_orchestrator")
+    sys.path.append(os.path.abspath(target_dir))
     import orchestrator_pb2
     import orchestrator_pb2_grpc
 
@@ -36,10 +38,11 @@ class TaskContext:
     raw_bytes: bytes
 
 class Worker:
-    def __init__(self, name: str, category: str, version: str):
+    def __init__(self, name: str, category: str, version: str, is_validator: bool = False):
         self.name = name
         self.category = category
         self.version = version
+        self.is_validator = is_validator
         self.worker_id = f"{name}-{uuid.uuid4().hex[:8]}"
         
         self.on_binary_handler = None
@@ -49,7 +52,7 @@ class Worker:
         self.redis_host = os.getenv("REDIS_HOST", "localhost")
         self.rest_url = f"http://{self.orchestrator_addr.split(':')[0]}:8000"
         
-        print(f"[*] Initializing Worker: {self.name} ({self.category})")
+        print(f"[*] Initializing Worker: {self.name} ({self.category}) {'[VALIDATOR]' if is_validator else ''}")
         
         try:
             self._channel = grpc.insecure_channel(self.orchestrator_addr)
@@ -86,7 +89,8 @@ class Worker:
         print(f"[*] Connecting to {self.orchestrator_addr}...")
         try:
             resp = self._stub.RegisterWorker(orchestrator_pb2.RegisterRequest(
-                worker_id=self.worker_id, backend_name=self.name, analysis_type=self.category
+                worker_id=self.worker_id, backend_name=self.name, 
+                analysis_type=self.category, is_validator=self.is_validator
             ))
             if resp.success:
                 print(f"[+] READY: Registered with ID {self.worker_id}")
@@ -105,6 +109,18 @@ class Worker:
             print(f"[>] Result posted for {item_key} (Conf: {confidence})")
         except Exception as e:
             print(f"[ERROR] Post failed for {item_key}: {e}")
+
+    def post_validation(self, item_key: str, target_id: str = "TOP", confidence: float = 1.0):
+        """Vouch for an existing hypothesis instead of posting new data."""
+        try:
+            self._stub.PostResult(orchestrator_pb2.PostResultRequest(
+                analysis_type=self.category, item_key=item_key,
+                result_data="", confidence=confidence, backend_name=self.name,
+                validation_target_id=target_id
+            ))
+            print(f"[V] Validation posted for {item_key} -> {target_id} (Conf: {confidence})")
+        except Exception as e:
+            print(f"[ERROR] Validation failed for {item_key}: {e}")
 
     def get_analysis(self, category: str, item_key: Optional[str] = None):
         url = f"{self.rest_url}/api/v1/blackboard/{category}"
@@ -147,9 +163,9 @@ class Worker:
 
 _current_worker: Optional[Worker] = None
 
-def plugin(name: str, category: str, version: str = "1.0"):
+def plugin(name: str, category: str, version: str = "1.0", is_validator: bool = False):
     global _current_worker
-    _current_worker = Worker(name, category, version)
+    _current_worker = Worker(name, category, version, is_validator)
     def decorator(cls):
         try:
             instance = cls()
