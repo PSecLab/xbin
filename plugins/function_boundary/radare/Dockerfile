@@ -16,7 +16,7 @@ COPY src ./src
 RUN pip install --no-cache-dir .
 
 # Copy worker script
-COPY plugins/function_boundary/radare/radare_boundary_worker.py .
+COPY radare_boundary_worker.py .
 
 ENV XBIN_ORCHESTRATOR=localhost:50051
 ENV PYTHONUNBUFFERED=1

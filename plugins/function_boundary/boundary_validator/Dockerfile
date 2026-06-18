@@ -9,7 +9,7 @@ COPY src ./src
 RUN pip install --no-cache-dir .
 
 # Copy worker script
-COPY plugins/function_boundary/boundary_validator/boundary_validator.py .
+COPY boundary_validator.py .
 
 ENV XBIN_ORCHESTRATOR=localhost:50051
 ENV PYTHONUNBUFFERED=1

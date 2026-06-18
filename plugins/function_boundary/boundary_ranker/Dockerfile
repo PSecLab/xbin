@@ -9,7 +9,7 @@ COPY src ./src
 RUN pip install --no-cache-dir .
 
 # Copy worker script
-COPY plugins/function_boundary/boundary_ranker/boundary_ranker.py .
+COPY boundary_ranker.py .
 
 ENV XBIN_ORCHESTRATOR=localhost:50051
 ENV PYTHONUNBUFFERED=1

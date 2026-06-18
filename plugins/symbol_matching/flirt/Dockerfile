@@ -17,7 +17,7 @@ RUN git clone --depth 1 https://github.com/maktm/flirtdb.git /app/flirtdb_repo &
     rm -rf /app/flirtdb_repo
 
 # Copy the plugin script
-COPY plugins/flirt/flirt_worker.py .
+COPY flirt_worker.py .
 
 # Default environment variables
 ENV XBIN_ORCHESTRATOR=localhost:50051
