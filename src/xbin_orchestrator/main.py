@@ -137,9 +137,17 @@ def get_health():
     return {"orchestrator": "HEALTHY", "worker_fleet": workers}
 
 @app.post("/api/v1/upload")
-async def upload_binary(file: UploadFile = File(...), requested_analyses: str = Form("")):
+async def upload_binary(file: UploadFile = File(...), iopairs: UploadFile = File(None), requested_analyses: str = Form("")):
     file_path = os.path.join(UPLOAD_DIR, file.filename)
     with open(file_path, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
+    # Optional ground-truth I/O pairs: save next to the binary under the sibling
+    # name the worker derives (<binary-stem>.iopairs.txt), regardless of the
+    # uploaded filename, so equation recovery can score/fit instead of returning
+    # an empty (skeleton-only) result.
+    if iopairs is not None and iopairs.filename:
+        iop_path = os.path.join(UPLOAD_DIR, os.path.splitext(file.filename)[0] + ".iopairs.txt")
+        with open(iop_path, "wb") as buffer: shutil.copyfileobj(iopairs.file, buffer)
+        sys_log(f"Upload: iopairs -> {os.path.basename(iop_path)}")
     analyses = [a.strip() for a in requested_analyses.split(",") if a.strip()]
     sys_log(f"Upload: {file.filename} for {analyses}")
     r.publish("xbin:events", json.dumps({"type": "NEW_BINARY", "filename": file.filename, "path": f"/app/uploads/{file.filename}", "requested_analyses": analyses}))
@@ -277,17 +285,42 @@ def get_plugin_path_and_context(name: str, category: str):
         spath = os.path.join(pdir, name)
         if category == "standalone" and os.path.exists(spath):
             return spath, spath
-            
+    print(f'plugin directory: {PLUGIN_DIRS}')      
     raise Exception(f"Plugin {category}/{name} not found in any PLUGIN_DIRS or EXPLICIT_PLUGINS")
+
+def _image_exists(image_name: str) -> bool:
+    return subprocess.run(["docker", "image", "inspect", image_name],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0
 
 def bg_start_plugin(name: str, category: str):
     container_name = get_container_name(name, category)
     image_name = f"xbin-plugin-{category}-{name}"
     try:
         p_path, p_context = get_plugin_path_and_context(name, category)
-        
-        set_plugin_state(name, category, "BUILDING")
-        
+
+        # Prebuilt plugins (marker file) are built out-of-band by their own
+        # build.sh -- e.g. equation_recovery, whose image extends a heavy Binary
+        # Ninja base the orchestrator can't build. Reuse the existing image and
+        # skip the build entirely; to rebuild, run build.sh again (or docker rmi).
+        if os.path.exists(os.path.join(p_path, ".xbin-prebuilt")):
+            if not _image_exists(image_name):
+                raise Exception(
+                    f"{name}/{category} is marked .xbin-prebuilt but image "
+                    f"'{image_name}' is missing -- run {p_path}/build.sh first")
+            sys_log(f"{image_name} is prebuilt; skipping build.")
+        else:
+            set_plugin_state(name, category, "BUILDING")
+            _build_plugin_image(name, category, image_name, p_path, p_context)
+
+        set_plugin_state(name, category, "STARTING")
+        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
+        abs_uploads = os.path.abspath(UPLOAD_DIR)
+        run_cmd = ["docker", "run", "-d", "--name", container_name, "--network", "host", "-v", f"{abs_uploads}:/app/uploads", "-e", "XBIN_ORCHESTRATOR=localhost:50051", "-e", "REDIS_HOST=localhost", "-e", "PYTHONUNBUFFERED=1", image_name]
+        subprocess.run(run_cmd, check=True, stdout=subprocess.DEVNULL)
+    except Exception as e:
+        sys_log(f"Fail {name}: {e}"); set_plugin_state(name, category, "ERROR", error=str(e))
+
+def _build_plugin_image(name: str, category: str, image_name: str, p_path: str, p_context: str):
         # For out-of-tree plugins, we inject the xbin SDK into the build context
         if p_context != ".":
             with tempfile.TemporaryDirectory() as tmp_dir:
@@ -312,14 +345,6 @@ def bg_start_plugin(name: str, category: str):
         else:
             # In-tree build from root
             subprocess.run(["docker", "build", "-t", image_name, "-f", os.path.join(p_path, "Dockerfile"), "."], check=True, stdout=subprocess.DEVNULL)
-        
-        set_plugin_state(name, category, "STARTING")
-        subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
-        abs_uploads = os.path.abspath(UPLOAD_DIR)
-        run_cmd = ["docker", "run", "-d", "--name", container_name, "--network", "host", "-v", f"{abs_uploads}:/app/uploads", "-e", "XBIN_ORCHESTRATOR=localhost:50051", "-e", "REDIS_HOST=localhost", "-e", "PYTHONUNBUFFERED=1", image_name]
-        subprocess.run(run_cmd, check=True, stdout=subprocess.DEVNULL)
-    except Exception as e:
-        sys_log(f"Fail {name}: {e}"); set_plugin_state(name, category, "ERROR", error=str(e))
 
 @app.post("/api/v1/plugins/{name}/start")
 def start_plugin(name: str, category: str, background_tasks: BackgroundTasks):
@@ -430,6 +455,8 @@ def dashboard():
                 <button class="btn" style="background: #2d3748;" onclick="showSystemLogs()">System Logs</button>
                 <button class="btn btn-danger btn-action" onclick="clearSession()">Clear Session</button>
                 <button class="btn btn-primary btn-action" onclick="bulkAction('start')">Start Fleet</button>
+                <input type="file" id="iop" style="display:none" onchange="document.getElementById('iopl').innerText=this.files[0].name">
+                <button class="btn btn-action" style="background:#2d3748" onclick="document.getElementById('iop').click()">📊 <span id="iopl">IO Pairs</span></button>
                 <button class="btn btn-danger btn-action" onclick="powerOff()">Power Off</button>
                 <div id="orc-health" class="badge badge-running">Orchestrator: OK</div>
             </div>
@@ -473,6 +500,8 @@ def dashboard():
             function toast(m) { const t=document.createElement('div'); t.className='toast'; t.innerText=m; document.getElementById('toasts').appendChild(t); setTimeout(()=>t.remove(),3000); }
             async function upload() {
                 const fd=new FormData(); fd.append('file', document.getElementById('f').files[0]);
+                const iop=document.getElementById('iop').files[0];
+                if(iop) fd.append('iopairs', iop);
                 const goals=Array.from(document.querySelectorAll('.goal:checked')).map(i=>i.value);
                 fd.append('requested_analyses', goals.join(','));
                 await fetch('/api/v1/upload', {method:'POST', body:fd}); toast('Binary Announced');
