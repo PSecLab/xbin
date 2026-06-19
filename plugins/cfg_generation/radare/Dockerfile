@@ -17,7 +17,7 @@ COPY src ./src
 RUN pip install --no-cache-dir .
 
 # Copy worker script
-COPY plugins/cfg_generation/radare/radare_worker.py .
+COPY radare_worker.py .
 
 ENV XBIN_ORCHESTRATOR=localhost:50051
 CMD ["python", "radare_worker.py"]

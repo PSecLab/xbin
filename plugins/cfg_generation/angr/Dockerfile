@@ -22,7 +22,7 @@ COPY src ./src
 RUN pip install --no-cache-dir .
 
 # Copy worker script
-COPY plugins/cfg_generation/angr/angr_worker.py .
+COPY angr_worker.py .
 
 ENV XBIN_ORCHESTRATOR=localhost:50051
 # Explicitly tell angr where to look for logs if needed

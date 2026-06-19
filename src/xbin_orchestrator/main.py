@@ -194,6 +194,15 @@ def list_available_plugins():
             if "Dockerfile" in os.listdir(os.path.dirname(path)):
                 available.append(_get_plugin_info(os.path.dirname(path), name.replace(".py", ""), category, docker_data, health_data, now))
 
+    # 3. Add dynamically connected workers
+    active_workers = r.hgetall("xbin:active_workers")
+    for w_id, type_info in active_workers.items():
+        if ":" in type_info:
+            category, name = type_info.split(":", 1)
+            # Add if not statically discovered
+            if not any(p["name"] == name and p["category"] == category for p in available):
+                available.append(_get_plugin_info("", name, category, docker_data, health_data, now))
+
     # De-duplicate by unique_id (category-name)
     seen = set()
     unique_available = []
@@ -211,23 +220,38 @@ def list_available_plugins():
     
     return {"plugins": unique_available, "rankers": ranker_map}
 
-def _get_plugin_info(root, name, category, docker_data, health_data, now):
-    unique_id = f"{category}-{name}"
+def get_static_plugin_info(root):
+    """Try to find the category and name in the source code first."""
+    if not os.path.exists(root): return None, None
+    files = os.listdir(root) if os.path.isdir(root) else [os.path.basename(root)]
+    search_dir = root if os.path.isdir(root) else os.path.dirname(root)
     
-    # Try to find the category in the source code first
-    files = os.listdir(root)
+    cat = None
+    name = None
     for f in files:
         if f.endswith(".py"):
             try:
-                with open(os.path.join(root, f), "r") as pf:
+                with open(os.path.join(search_dir, f), "r") as pf:
                     content = pf.read()
                     import re
                     # Look for category="something" or category='something'
                     cat_match = re.search(r'category=["\']([^"\']+)["\']', content)
-                    if cat_match:
-                        category = cat_match.group(1)
-                        break
+                    if cat_match: cat = cat_match.group(1)
+                    
+                    name_match = re.search(r'name=["\']([^"\']+)["\']', content)
+                    if name_match: name = name_match.group(1)
+                    
+                    if cat and name: return cat, name
             except: pass
+    return cat, name
+
+def _get_plugin_info(root, name, category, docker_data, health_data, now):
+    # Prioritize category and name found in source code
+    static_cat, static_name = get_static_plugin_info(root)
+    if static_cat: category = static_cat
+    if static_name: name = static_name
+
+    unique_id = f"{category}-{name}"
 
     state_str = r.get(f"xbin:plugin_state:{category}:{name}")
     saved = json.loads(state_str) if state_str else {"status": "STOPPED"}
@@ -236,6 +260,7 @@ def _get_plugin_info(root, name, category, docker_data, health_data, now):
     # Static discovery: Check if is_validator/is_ranker=True
     is_validator = saved.get("is_validator", False)
     is_ranker = saved.get("is_ranker", False)
+    files = os.listdir(root) if os.path.isdir(root) else []
     if not is_validator or not is_ranker:
         for f in files:
             if f.endswith(".py"):
@@ -264,7 +289,13 @@ def _get_plugin_info(root, name, category, docker_data, health_data, now):
 def get_plugin_path_and_context(name: str, category: str):
     # 1. Check EXPLICIT_PLUGINS first
     for path, p_category in EXPLICIT_PLUGINS:
-        if p_category == category and os.path.basename(path).replace(".py", "") == name:
+        static_cat, static_name = get_static_plugin_info(path)
+        
+        # Determine effective name and category for this explicit path
+        eff_name = static_name if static_name else os.path.basename(path).replace(".py", "")
+        eff_cat = static_cat if static_cat else p_category
+        
+        if eff_name == name and eff_cat == category:
             if os.path.isdir(path):
                 return path, path
             else:

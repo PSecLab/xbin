@@ -11,7 +11,7 @@ COPY src ./src
 RUN pip install --no-cache-dir .
 
 # Copy worker script
-COPY plugins/function_boundary/angr/angr_boundary_worker.py .
+COPY angr_boundary_worker.py .
 
 ENV XBIN_ORCHESTRATOR=localhost:50051
 ENV PYTHONUNBUFFERED=1
