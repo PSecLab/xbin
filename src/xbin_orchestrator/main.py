@@ -286,6 +286,15 @@ def _get_plugin_info(root, name, category, docker_data, health_data, now):
             
     return {"name": name, "category": category, "status": status, "health": health_status, "last_beat": last_beat, "error": saved.get("error"), "is_validator": is_validator, "is_ranker": is_ranker}
 
+def _plugin_matches(root, name, category):
+    static_cat, static_name = get_static_plugin_info(root)
+    dir_name = os.path.basename(root)
+    dir_cat = os.path.basename(os.path.dirname(root))
+
+    eff_name = static_name if static_name else dir_name
+    eff_cat = static_cat if static_cat else dir_cat
+    return eff_name == name and eff_cat == category
+
 def get_plugin_path_and_context(name: str, category: str):
     # 1. Check EXPLICIT_PLUGINS first
     for path, p_category in EXPLICIT_PLUGINS:
@@ -301,10 +310,22 @@ def get_plugin_path_and_context(name: str, category: str):
             else:
                 return os.path.dirname(path), os.path.dirname(path)
 
-    # 2. Default in-tree plugins build from the repository root (.)
+    # 2. Default in-tree plugins build from the plugin directory. The build
+    # helper stages that directory and injects the SDK files the Dockerfiles need.
     default_path = os.path.join(DEFAULT_PLUGINS_DIR, category, name)
     if os.path.exists(default_path):
-        return default_path, "."
+        return default_path, default_path
+
+    # Plugin directories do not have to match the decorator name. For example,
+    # plugins/cfg_generation/radare declares name="radare_cfg".
+    for pdir in PLUGIN_DIRS:
+        if not os.path.exists(pdir):
+            continue
+        for root, dirs, files in os.walk(pdir):
+            if "Dockerfile" not in files:
+                continue
+            if _plugin_matches(root, name, category):
+                return root, root
         
     # 3. Out-of-tree plugins in PLUGIN_DIRS
     for pdir in PLUGIN_DIRS:
@@ -352,10 +373,10 @@ def bg_start_plugin(name: str, category: str):
         sys_log(f"Fail {name}: {e}"); set_plugin_state(name, category, "ERROR", error=str(e))
 
 def _build_plugin_image(name: str, category: str, image_name: str, p_path: str, p_context: str):
-        # For out-of-tree plugins, we inject the xbin SDK into the build context
+        # Stage the plugin directory and inject the xbin SDK into the build context.
         if p_context != ".":
             with tempfile.TemporaryDirectory() as tmp_dir:
-                sys_log(f"Building out-of-tree plugin {name} in {tmp_dir}")
+                sys_log(f"Building plugin {category}/{name} in {tmp_dir}")
                 # Copy everything from the plugin context into the temp dir
                 shutil.copytree(p_context, tmp_dir, dirs_exist_ok=True)
                 
@@ -374,8 +395,7 @@ def _build_plugin_image(name: str, category: str, image_name: str, p_path: str, 
                 
                 subprocess.run(["docker", "build", "--no-cache", "-t", image_name, "-f", dockerfile_path, tmp_dir], check=True, stdout=subprocess.DEVNULL)
         else:
-            # In-tree build from root
-            subprocess.run(["docker", "build", "-t", image_name, "-f", os.path.join(p_path, "Dockerfile"), "."], check=True, stdout=subprocess.DEVNULL)
+            subprocess.run(["docker", "build", "-t", image_name, "-f", os.path.join(p_path, "Dockerfile"), p_context], check=True, stdout=subprocess.DEVNULL)
 
 @app.post("/api/v1/plugins/{name}/start")
 def start_plugin(name: str, category: str, background_tasks: BackgroundTasks):
