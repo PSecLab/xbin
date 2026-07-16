@@ -1,5 +1,0 @@
-# Presence of this file tells the xbin orchestrator NOT to build this plugin.
-# The image bakes in a 1.2G Binary Ninja install + license, built out-of-band by
-# ./build.sh. On start the orchestrator reuses the existing image:
-# xbin-plugin-function_boundary-binja.
-# Rebuild: re-run ./build.sh, or `docker rmi xbin-plugin-function_boundary-binja`.

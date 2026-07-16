@@ -343,9 +343,9 @@ def bg_start_plugin(name: str, category: str):
         p_path, p_context = get_plugin_path_and_context(name, category)
 
         # Prebuilt plugins (marker file) are built out-of-band by their own
-        # build.sh -- e.g. equation_recovery, whose image extends a heavy Binary
-        # Ninja base the orchestrator can't build. Reuse the existing image and
-        # skip the build entirely; to rebuild, run build.sh again (or docker rmi).
+        # build.sh -- typically because the image extends a heavy or licensed
+        # base the orchestrator can't build. Reuse the existing image and skip
+        # the build entirely; to rebuild, run build.sh again (or docker rmi).
         if os.path.exists(os.path.join(p_path, ".xbin-prebuilt")):
             if not _image_exists(image_name):
                 raise Exception(

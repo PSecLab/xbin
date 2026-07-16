@@ -44,50 +44,40 @@ pip install .
 3. **Deploy the Fleet**: Use the "Plugin Manager" sidebar to start tools like `angr_cfg` or `radare_cfg`.
 4. **Analyze**: Upload a binary, select your goals, and watch the blackboard populate in real-time.
 
-## 🧩 Prebuilt (Binary Ninja) Plugins
+## 🧩 External Plugins
 
-A few plugins extend a heavy **Binary Ninja** base image that the orchestrator
-can't build on its own. These are marked with a `.xbin-prebuilt` file and must be
-built **once, out-of-band**, using their own `build.sh`. Each reads a sibling
-`build.conf` for your Binary Ninja install dir + license path.
-
-**One-time setup** — set your paths in each `build.conf`, then build:
+Plugins do not have to live in this repo. Point the orchestrator at a plugin
+checked out anywhere and it discovers it from the `@xbin.plugin` decorator,
+injecting the SDK into the build for you:
 
 ```bash
-# 1. Function boundaries via Binary Ninja
-cd plugins/function_boundary/binja
-#   edit build.conf -> "binja dir" + "license path"
-./build.sh
-
-# 2. Equation recovery — Our developed tool
-cd plugins/symbol_matching/equation_recovery
-./build.sh
-
-# 3. Equation recovery — PySR symbolic regression
-cd plugins/symbol_matching/morpheus
-./build.sh
+xbin-orchestrator --plugin ~/xbin_external_example     # one plugin
+xbin-orchestrator --plugin-dir ~/my-plugins            # a tree of them
 ```
 
-After this, the orchestrator **reuses the existing images and skips the build**
-(thanks to `.xbin-prebuilt`). To rebuild later, just re-run that plugin's
-`./build.sh`.
+See [xbin_external_example](https://github.com/PSecLab/xbin_external_example)
+for a minimal standalone plugin repo.
+
+A plugin whose image is too heavy for the orchestrator to build (e.g. one
+extending a licensed Binary Ninja base) can ship a `.xbin-prebuilt` marker and
+its own `build.sh`. The orchestrator then reuses the existing image and skips
+the build entirely.
 
 ## 🚥 Running an Analysis (end to end)
 
-> 💡 **No binary handy?** A ready-to-use sample is bundled in [`examples/`](examples/): `sample.elf` and its matching `sample.iopairs.txt` — use them for steps 2 and 3.
+> 💡 **No binary handy?** A ready-to-use `sample.elf` is bundled in [`examples/`](examples/).
 
 1. **Start the engine** and open the dashboard:
    ```bash
    xbin-orchestrator        # → http://localhost:8000
    ```
 2. **Load the binary** — *Choose Binary*.
-3. **Load the I/O pairs** — *📊 IO Pairs* (required for equation recovery to
-   score/fit; provided as `<binary-stem>.iopairs.txt`).
-4. **Select goals** — tick **Boundaries** (`function_boundary`) and
+3. **Select goals** — tick **Boundaries** (`function_boundary`) and
    **Symbols** (`symbol_matching`).
-5. **Start the plugins** — `binja` (boundaries), and `equation_recovery`
-   and/or `morpheus` (symbols), plus any others you want competing.
-6. **Start Analysis** 🚀 — the fleet reacts and the blackboard fills in.
+4. **Start the plugins** — e.g. `angr_boundaries` and `radare_boundaries`
+   (boundaries) and `flirt_matcher` (symbols), plus any others you want
+   competing. Add `--plugin <path>` at startup to bring in external ones.
+5. **Start Analysis** 🚀 — the fleet reacts and the blackboard fills in.
 
 ## 👩‍💻 How to Add Your Own Tool
 
