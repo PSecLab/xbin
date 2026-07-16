@@ -137,17 +137,9 @@ def get_health():
     return {"orchestrator": "HEALTHY", "worker_fleet": workers}
 
 @app.post("/api/v1/upload")
-async def upload_binary(file: UploadFile = File(...), iopairs: UploadFile = File(None), requested_analyses: str = Form("")):
+async def upload_binary(file: UploadFile = File(...), requested_analyses: str = Form("")):
     file_path = os.path.join(UPLOAD_DIR, file.filename)
     with open(file_path, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
-    # Optional ground-truth I/O pairs: save next to the binary under the sibling
-    # name the worker derives (<binary-stem>.iopairs.txt), regardless of the
-    # uploaded filename, so equation recovery can score/fit instead of returning
-    # an empty (skeleton-only) result.
-    if iopairs is not None and iopairs.filename:
-        iop_path = os.path.join(UPLOAD_DIR, os.path.splitext(file.filename)[0] + ".iopairs.txt")
-        with open(iop_path, "wb") as buffer: shutil.copyfileobj(iopairs.file, buffer)
-        sys_log(f"Upload: iopairs -> {os.path.basename(iop_path)}")
     analyses = [a.strip() for a in requested_analyses.split(",") if a.strip()]
     sys_log(f"Upload: {file.filename} for {analyses}")
     r.publish("xbin:events", json.dumps({"type": "NEW_BINARY", "filename": file.filename, "path": f"/app/uploads/{file.filename}", "requested_analyses": analyses}))
@@ -506,8 +498,6 @@ def dashboard():
                 <button class="btn" style="background: #2d3748;" onclick="showSystemLogs()">System Logs</button>
                 <button class="btn btn-danger btn-action" onclick="clearSession()">Clear Session</button>
                 <button class="btn btn-primary btn-action" onclick="bulkAction('start')">Start Fleet</button>
-                <input type="file" id="iop" style="display:none" onchange="document.getElementById('iopl').innerText=this.files[0].name">
-                <button class="btn btn-action" style="background:#2d3748" onclick="document.getElementById('iop').click()">📊 <span id="iopl">IO Pairs</span></button>
                 <button class="btn btn-danger btn-action" onclick="powerOff()">Power Off</button>
                 <div id="orc-health" class="badge badge-running">Orchestrator: OK</div>
             </div>
@@ -551,8 +541,6 @@ def dashboard():
             function toast(m) { const t=document.createElement('div'); t.className='toast'; t.innerText=m; document.getElementById('toasts').appendChild(t); setTimeout(()=>t.remove(),3000); }
             async function upload() {
                 const fd=new FormData(); fd.append('file', document.getElementById('f').files[0]);
-                const iop=document.getElementById('iop').files[0];
-                if(iop) fd.append('iopairs', iop);
                 const goals=Array.from(document.querySelectorAll('.goal:checked')).map(i=>i.value);
                 fd.append('requested_analyses', goals.join(','));
                 await fetch('/api/v1/upload', {method:'POST', body:fd}); toast('Binary Announced');
