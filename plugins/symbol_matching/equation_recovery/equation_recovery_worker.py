@@ -21,14 +21,12 @@ import sys
 
 import xbin
 
-# --- Morpheus recovery CORE (general; no dataset coupling) -------------------
-# Lives in binja_scripts/equation_recovery.py (baked into the Morpheus base
-# image). It needs ONLY (binary, func, iopairs) -- no synthetic_dataset.
-_CORE_DIR = os.environ.get("MORPHEUS_CORE_DIR", "/project/pysindy/binja_scripts")
+
+_CORE_DIR = os.environ.get("MORPHEUS_CORE_DIR", "/project/pysindy")
 if _CORE_DIR not in sys.path:
     sys.path.insert(0, _CORE_DIR)
 
-import equation_recovery as PIPE   # noqa: E402  (recover_equation + load_iopairs)
+import xbin_api  
 
 _GOAL = "symbol_matching"
 
@@ -43,21 +41,13 @@ def _parse_func(spec):
         return s
 
 
-def _iopairs_path(binary_path):
-    """Derive the iopairs filepath from the binary path (sibling convention).
-    Returns a path if it exists, else None (-> unscored recovery)."""
-    cand = os.path.splitext(binary_path)[0] + ".iopairs.txt"
-    return cand if os.path.exists(cand) else None
-
-
 @xbin.plugin(name="equation_recovery", category="symbol_matching")
 class EquationRecoveryWorker:
     def __init__(self):
         # on_update() only receives (category, item_key, ...) -- no binary -- so
-        # we cache the announced binary + its iopairs here and reuse them for
-        # every function address the boundary stage discovers.
+        # cache the announced binary here and reuse it for every function address
+        # the boundary stage discovers. io_pairs are collected per function.
         self._binary_path = None
-        self._X = self._y = None
         self._active = False        # symbol_matching requested for this binary?
         self._done = set()          # func addrs already recovered (dedup)
 
@@ -75,20 +65,12 @@ class EquationRecoveryWorker:
             self._active = False
             return
 
-        # cache inputs: binary (given) + iopairs (derived). func now comes from
-        # function_boundary results, not EQREC_FUNC.
+        # Only the binary is cached: io_pairs are collected per function address,
+        # inside recover_for_function(), once the boundary stage posts one.
         self._binary_path = binary_path
         self._done = set()
-        self._X = self._y = None
-        io_path = _iopairs_path(binary_path)
-        if io_path:
-            try:
-                _names, self._X, self._y = PIPE.load_iopairs(io_path)
-            except Exception as e:
-                print(f"[eqrec] iopairs load failed ({io_path}): {e!r}")
         print(f"[eqrec] armed for {os.path.basename(binary_path)}; "
-              f"waiting for function_boundary addresses"
-              + ("" if io_path else " (no iopairs -> unscored)"))
+              f"waiting for function_boundary addresses")
 
     def on_update(self, category, item_key, new_hypothesis, top_hypothesis):
         print(f'on updated called')
@@ -110,12 +92,15 @@ class EquationRecoveryWorker:
         binary_path = self._binary_path
         try:
             print(f'eqn recovery is being processed')
-            result = PIPE.recover_equation(binary_path, func=addr,
-                                           X=self._X, y=self._y)
+            # Collects io_pairs for THIS function under FastDyn, then fits.
+            result = xbin_api.recover_for_function(binary_path, addr)
         except Exception as e:
             print(f"[eqrec] recovery failed for {hex(addr)}: {e!r}")
             return
 
+        if not result:
+            print(f"[eqrec] no usable io_pairs for {hex(addr)}")
+            return
         equation = result.get("equation")
         if not equation:
             print(f"[eqrec] no equation recovered for {hex(addr)}")

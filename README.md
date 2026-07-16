@@ -44,6 +44,51 @@ pip install .
 3. **Deploy the Fleet**: Use the "Plugin Manager" sidebar to start tools like `angr_cfg` or `radare_cfg`.
 4. **Analyze**: Upload a binary, select your goals, and watch the blackboard populate in real-time.
 
+## 🧩 Prebuilt (Binary Ninja) Plugins
+
+A few plugins extend a heavy **Binary Ninja** base image that the orchestrator
+can't build on its own. These are marked with a `.xbin-prebuilt` file and must be
+built **once, out-of-band**, using their own `build.sh`. Each reads a sibling
+`build.conf` for your Binary Ninja install dir + license path.
+
+**One-time setup** — set your paths in each `build.conf`, then build:
+
+```bash
+# 1. Function boundaries via Binary Ninja
+cd plugins/function_boundary/binja
+#   edit build.conf -> "binja dir" + "license path"
+./build.sh
+
+# 2. Equation recovery — Our developed tool
+cd plugins/symbol_matching/equation_recovery
+./build.sh
+
+# 3. Equation recovery — PySR symbolic regression
+cd plugins/symbol_matching/morpheus
+./build.sh
+```
+
+After this, the orchestrator **reuses the existing images and skips the build**
+(thanks to `.xbin-prebuilt`). To rebuild later, just re-run that plugin's
+`./build.sh`.
+
+## 🚥 Running an Analysis (end to end)
+
+> 💡 **No binary handy?** A ready-to-use sample is bundled in [`examples/`](examples/): `sample.elf` and its matching `sample.iopairs.txt` — use them for steps 2 and 3.
+
+1. **Start the engine** and open the dashboard:
+   ```bash
+   xbin-orchestrator        # → http://localhost:8000
+   ```
+2. **Load the binary** — *Choose Binary*.
+3. **Load the I/O pairs** — *📊 IO Pairs* (required for equation recovery to
+   score/fit; provided as `<binary-stem>.iopairs.txt`).
+4. **Select goals** — tick **Boundaries** (`function_boundary`) and
+   **Symbols** (`symbol_matching`).
+5. **Start the plugins** — `binja` (boundaries), and `equation_recovery`
+   and/or `morpheus` (symbols), plus any others you want competing.
+6. **Start Analysis** 🚀 — the fleet reacts and the blackboard fills in.
+
 ## 👩‍💻 How to Add Your Own Tool
 
 The `xbin` SDK makes it trivial to wrap any analysis script into a containerized worker. For a detailed guide and a "Hello World" example, see the **[SDK Reference Guide](docs/sdk_reference.md)**.

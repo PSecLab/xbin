@@ -23,6 +23,13 @@ import xbin
 import binaryninja as bn
 
 
+# Morpheus's public seam (baked into this image). We post only the functions it
+# says are recoverable -- one bb + FP in/out -- so the boundaries on the
+# blackboard are the ones equation_recovery can actually consume, not every
+# libm/newlib/startup routine the lift finds.
+import xbin_api
+
+
 def _func_size(f):
     """Byte span of a BN function (sum of its block ranges), robust to API shape."""
     try:
@@ -58,8 +65,12 @@ class BinjaBoundaryWorker:
         from xbin.sdk import _current_worker
 
         count = 0
+        skipped = 0
         try:
             for f in bv.functions:
+                if not xbin_api.is_candidate(f):
+                    skipped += 1
+                    continue
                 size = _func_size(f)
                 _current_worker.post_result(
                     item_key=hex(f.start),
@@ -72,7 +83,7 @@ class BinjaBoundaryWorker:
                 )
                 count += 1
             print(f"[binja-fb] posted {count} boundaries for {filename} "
-                  f"(base={hex(bv.start)})")
+                  f"(base={hex(bv.start)}; skipped {skipped} non-candidate)")
         finally:
             bv.file.close()
 

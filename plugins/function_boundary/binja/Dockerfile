@@ -48,13 +48,16 @@ COPY license.dat /root/.binaryninja/license.dat
 
 # xbin SDK source (injected as `src/`, FLIRT pattern) on PYTHONPATH.
 COPY src /opt/xbin_sdk
+# Morpheus seam (xbin_api) + the modules its candidate predicate imports. This
+# image is NOT from the pysindy base, so they are staged in by build.sh.
+COPY xbin_api.py /project/pysindy/xbin_api.py
+COPY binja_scripts /project/pysindy/binja_scripts
 COPY binja_boundary_worker.py /app/binja_boundary_worker.py
 
-ENV PYTHONPATH=/opt/xbin_sdk:/opt/xbin_sdk/xbin_orchestrator:/project/binaryninja/python \
+ENV PYTHONPATH=/opt/xbin_sdk:/opt/xbin_sdk/xbin_orchestrator:/project/binaryninja/python:/project/pysindy \
     LD_LIBRARY_PATH=/project/binaryninja \
     XBIN_ORCHESTRATOR=localhost:50051 \
     REDIS_HOST=localhost
 
 WORKDIR /app
-# Headless Binary Ninja API on system python3 (license at /root/.binaryninja).
 CMD ["python3", "/app/binja_boundary_worker.py"]

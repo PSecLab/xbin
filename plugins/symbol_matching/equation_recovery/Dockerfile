@@ -40,8 +40,8 @@ COPY plugins/symbol_matching/equation_recovery/selftest_in_image.py        /app/
 # SDK source (/opt/xbin_sdk + its xbin_orchestrator subdir) + recovery core all
 # import from the single Binja interpreter (bnpython3 = system py3.10 + Binja).
 # SDK reads XBIN_ORCHESTRATOR / REDIS_HOST from environment.
-ENV MORPHEUS_CORE_DIR=/project/pysindy/binja_scripts \
-    PYTHONPATH=/opt/xbin_sdk:/opt/xbin_sdk/xbin_orchestrator:/project/pysindy/binja_scripts \
+ENV MORPHEUS_CORE_DIR=/project/pysindy \
+    PYTHONPATH=/opt/xbin_sdk:/opt/xbin_sdk/xbin_orchestrator:/project/pysindy \
     EQREC_FUNC=myfunc \
     XBIN_ORCHESTRATOR=localhost:50051 \
     REDIS_HOST=localhost
