@@ -51,3 +51,21 @@ Thumbs.db
 # Redis
 dump.rdb
 appendonly.aof
+
+# Test artifacts
+tests/.orchestrator.log
+e2e_*.log
+orchestrator_*.log
+
+# Repo-local scratch on the big disk (build staging, orchestrator temp/log)
+.xbin_scratch/
+
+# Server-side reference-binary library (large ELFs stay local)
+references/*
+!references/.gitkeep
+
+# Local test firmware (pysyndy sample); keep out of the public fork
+/sample.axf
+
+# Persistent worker analysis caches (ghidriff diff / fid ghidra proj / bind_se sigdb)
+cache/
