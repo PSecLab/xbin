@@ -169,6 +169,10 @@ Our RPC and JSON schemes are evolving. If you have suggestions for better multi-
 
 ## 🏗️ Architecture
 
+For the full picture — the Morpheus/BIND tool layout, consensus math, and the
+non-obvious parts of the plugin/Docker system — see the
+**[Architecture Notes](docs/architecture.md)**.
+
 - **Orchestrator**: FastAPI (REST/Web) + gRPC (Worker Comm) + Docker CLI (Container Management).
 - **SDK**: A reactive wrapper using Redis Pub/Sub for events and gRPC for reporting.
 - **Blackboard**: Redis-backed global state with per-category hypothesis tracking.

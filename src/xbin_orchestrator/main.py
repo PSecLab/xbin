@@ -1,4 +1,5 @@
 import os
+import re
 import json
 import threading
 from concurrent import futures
@@ -15,6 +16,7 @@ import argcomplete
 
 import grpc
 import redis
+import requests
 from fastapi import FastAPI, HTTPException, UploadFile, File, BackgroundTasks, Form
 from fastapi.responses import HTMLResponse
 import uvicorn
@@ -35,19 +37,71 @@ except (ImportError, ValueError):
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 GRPC_PORT = "[::]:50051"
 REST_PORT = 8000
+# Local ollama endpoint used to turn raw results (SMT2 expressions / matched
+# function names) into a readable one-liner for the dashboard. Same model the
+# workers/arbiter use. Reached over --network host at 127.0.0.1.
+OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/v1/chat/completions")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
 DEFAULT_PLUGINS_DIR = os.getenv("XBIN_PLUGINS_DIR", "plugins")
 PLUGIN_DIRS = [DEFAULT_PLUGINS_DIR]
 EXPLICIT_PLUGINS = []
 UPLOAD_DIR = "uploads"
+# Server-side library of symbolized reference binaries (betaflight, arducopter,
+# ...). The user picks one from a dropdown instead of uploading a reference every
+# time; the chosen file is copied to uploads/<target-stem>.reference so the BIND
+# plugins pick it up via bind_helpers.sibling(). Drop more *.reference ELFs here
+# to extend the menu.
+REFERENCE_DIR = "references"
 
+# Persistent per-analysis cache on the big disk, mounted into every worker so the
+# expensive artifacts survive a fleet restart (and are reused on a re-run of the
+# same binary -- e.g. a demo). Two sinks the Morpheus tools reuse across runs:
+#   job_outputs/  -> ghidriff's whole-program diff cache (skips re-diffing the
+#                    multi-MB reference when its <ref>-<target>_diff.json exists)
+#                    + fid's Ghidra project + symbolic_regression outputs.
+#   se_sigdb/     -> bind_se's growing signature DB (skips angr + LLM for
+#                    already-recovered signatures).
+# Both baked dirs are empty in bind:latest, so mounting over them hides nothing.
+# (bind_se's angr rtdb and pysindy's outputs already land under uploads/, which is
+# likewise persisted.) Keeping the fleet warm between runs reuses these too.
+CACHE_DIR = "cache"
+
+# Scratch/temp on the big disk, NOT root. This server's /tmp lives on the small
+# root filesystem (~50G free); the repo (and Docker's data-root) live on the
+# multi-TB /evaldisk. Point every host-side tempfile (the plugin build staging in
+# _build_plugin_image, bind_helpers' config temps, etc.) at a repo-local scratch
+# dir so a build or run can never fill root. Container-internal scratch already
+# lands on evaldisk via Docker's data-root. Override with XBIN_TMPDIR if desired.
+SCRATCH_DIR = os.getenv("XBIN_TMPDIR") or os.path.abspath(".xbin_scratch")
+try:
+    os.makedirs(SCRATCH_DIR, exist_ok=True)
+    os.environ["TMPDIR"] = os.environ["TMP"] = os.environ["TEMP"] = SCRATCH_DIR
+    tempfile.tempdir = SCRATCH_DIR
+except OSError:
+    pass  # fall back to the system default rather than refusing to start
+
+# Generic worker env passthrough: forward an operator-specified allowlist of env
+# vars from the orchestrator's environment into every worker container (via
+# `docker run -e`) when they are set. Empty by default (nothing forwarded), so
+# behaviour is unchanged unless configured. Set XBIN_WORKER_ENV_PASSTHROUGH to a
+# comma-separated list to enable -- e.g. to tune a plugin's worker knobs at fleet
+# start without rebuilding its image. Deliberately plugin-agnostic: no plugin- or
+# tool-specific variable names live in the orchestrator core.
+WORKER_ENV_PASSTHROUGH = tuple(
+    v.strip() for v in os.getenv("XBIN_WORKER_ENV_PASSTHROUGH", "").split(",") if v.strip()
+)
+
+# Per-backend consensus weights (multiplied into each result's raw confidence).
+# The four BIND tools + the ollama arbiter. Signature matchers (fid/ghidriff)
+# produce high-precision identity matches, so they carry more weight than the
+# semantic recoverers (bind_se/symbolic_regression). Unknown backends -> 0.5.
 BACKEND_WEIGHTS = {
-    "exact_hasher": 1.0,
-    "agentic_arbiter": 1.0,
-    "flirt_matcher": 1.0,
-    "angr_boundaries": 1.0,
-    "radare_boundaries": 0.85,
-    "semantic_llm": 0.85,
-    "structural_cfg": 0.70
+    "fid": 1.0,                  # Ghidra FunctionID signature matching
+    "ghidriff": 0.95,           # Ghidra ghidriff / BSim binary diffing
+    "symbolic_regression": 0.90, # PySR symbolic regression + ollama explanation (highest-priority recoverer)
+    "bind_se": 0.85,            # angr symbolic execution + ollama explanation
+    "pysindy": 0.85,            # BIND binary->equation (Binja structure + numpy STLSQ sparse regression)
+    "bind_arbiter": 1.0,        # ollama arbiter (ranker)
 }
 MARGIN_THRESHOLD = 0.05
 
@@ -58,7 +112,7 @@ def sys_log(msg):
     entry = f"[{timestamp}] {msg}"
     print(entry)
     r.lpush("xbin:syslogs", entry)
-    r.ltrim("xbin:syslogs", 0, 100)
+    r.ltrim("xbin:syslogs", 0, 4999)  # keep enough for a full ~100-function verbose run
 
 def set_plugin_state(name, category, status, error=None):
     state = {"status": status, "last_update": time.time()}
@@ -106,7 +160,20 @@ def cleanup_stale_plugins():
 # ==========================================
 app = FastAPI(title="xbin Multi-Analysis Orchestrator", version="1.8.0")
 
-if not os.path.exists(UPLOAD_DIR): os.makedirs(UPLOAD_DIR)
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(REFERENCE_DIR, exist_ok=True)
+# Persistent worker caches (job_outputs = ghidriff diff / fid ghidra proj / SR out;
+# se_sigdb = bind_se signature DB). Created here + world-writable for the same
+# reason as uploads/ (workers run as uid bind=1000).
+CACHE_JOB_OUTPUTS = os.path.join(CACHE_DIR, "job_outputs")
+CACHE_SE_SIGDB = os.path.join(CACHE_DIR, "se_sigdb")
+# uploads/ is bind-mounted into every worker container, but the workers run as a
+# different uid (bind=1000) and cache sidecars (<bin>.setup_end, <bin>.bndb) next
+# to the firmware. Make it world-writable so bind_se/symbolic_regression can run.
+for _d in (UPLOAD_DIR, CACHE_JOB_OUTPUTS, CACHE_SE_SIGDB):
+    os.makedirs(_d, exist_ok=True)
+    try: os.chmod(_d, 0o777)
+    except OSError: pass
 
 def get_container_name(name: str, category: str):
     return f"xbin-worker-{category.strip()}-{name.strip()}"
@@ -136,10 +203,52 @@ def get_health():
         })
     return {"orchestrator": "HEALTHY", "worker_fleet": workers}
 
+def list_references():
+    """Reference binaries available in the server-side library (name -> path)."""
+    refs = {}
+    try:
+        for fn in sorted(os.listdir(REFERENCE_DIR)):
+            if fn.endswith(".reference"):
+                refs[os.path.splitext(fn)[0]] = os.path.join(REFERENCE_DIR, fn)
+    except OSError:
+        pass
+    return refs
+
+def suggest_reference(target_filename, refs):
+    """Auto-pick a reference by matching its name against the target filename."""
+    stem = os.path.splitext(os.path.basename(target_filename or ""))[0].lower()
+    for name in refs:
+        if name.lower() in stem:
+            return name
+    return ""
+
+@app.get("/api/v1/references")
+def get_references(target: str = ""):
+    refs = list_references()
+    return {"references": sorted(refs.keys()), "suggested": suggest_reference(target, refs)}
+
 @app.post("/api/v1/upload")
-async def upload_binary(file: UploadFile = File(...), requested_analyses: str = Form("")):
+async def upload_binary(file: UploadFile = File(...), reference: UploadFile = File(None),
+                        reference_name: str = Form(""), requested_analyses: str = Form("")):
     file_path = os.path.join(UPLOAD_DIR, file.filename)
     with open(file_path, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
+    # Symbolized reference binary saved next to the target under the sibling name
+    # the BIND plugins derive (<binary-stem>.reference) so ghidriff/bind_se diff
+    # against it instead of the baked default. Priority:
+    #   1. an explicitly uploaded custom reference, else
+    #   2. a reference_name selected from the server-side library, else
+    #   3. nothing -> the baked default reference applies.
+    ref_path = os.path.join(UPLOAD_DIR, os.path.splitext(file.filename)[0] + ".reference")
+    if reference is not None and reference.filename:
+        with open(ref_path, "wb") as buffer: shutil.copyfileobj(reference.file, buffer)
+        sys_log(f"Upload: custom reference -> {os.path.basename(ref_path)}")
+    elif reference_name:
+        src = list_references().get(reference_name)
+        if src:
+            shutil.copyfile(src, ref_path)
+            sys_log(f"Upload: reference '{reference_name}' -> {os.path.basename(ref_path)}")
+        else:
+            sys_log(f"Upload: reference '{reference_name}' not found in library; using baked default")
     analyses = [a.strip() for a in requested_analyses.split(",") if a.strip()]
     sys_log(f"Upload: {file.filename} for {analyses}")
     r.publish("xbin:events", json.dumps({"type": "NEW_BINARY", "filename": file.filename, "path": f"/app/uploads/{file.filename}", "requested_analyses": analyses}))
@@ -149,9 +258,43 @@ async def upload_binary(file: UploadFile = File(...), requested_analyses: str = 
 def get_plugin_logs(name: str, category: str):
     container_name = get_container_name(name, category)
     try:
-        res = subprocess.run(["docker", "logs", "--tail", "100", container_name], capture_output=True, text=True)
+        res = subprocess.run(["docker", "logs", "--tail", "100", container_name], capture_output=True, text=True, timeout=5)
         return {"logs": res.stdout + res.stderr}
     except Exception as e: return {"logs": f"Error: {e}"}
+
+@app.get("/api/v1/workers/logs")
+def get_merged_worker_logs(tail: int = 80):
+    """Merged stdout of every running worker container, one interleaved stream.
+
+    Tails each `xbin-worker-*` container with docker's RFC3339 --timestamps and
+    sorts lexically (== chronologically), tagging each line with the short worker
+    name. This is the "Worker Deep Dive" live view: the richest per-function
+    progress (workers print `Result posted for <addr>` etc. to stdout). Every
+    subprocess is timeout-guarded and per-container isolated so one wedged
+    container/daemon can't blank the whole response.
+    """
+    tail = max(1, min(tail, 200))
+    try:
+        ps = subprocess.run(
+            ["docker", "ps", "--filter", "name=xbin-worker-", "--filter", "status=running", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=5)
+        names = [n for n in ps.stdout.splitlines() if n]
+    except Exception as e:
+        return {"logs": f"Error listing workers: {e}", "workers": [], "count": 0}
+    merged = []
+    for cname in names:
+        short = cname.replace("xbin-worker-", "")
+        try:
+            res = subprocess.run(["docker", "logs", "--tail", str(tail), "--timestamps", cname],
+                                 capture_output=True, text=True, timeout=5)
+            for line in (res.stdout + res.stderr).splitlines():
+                ts, _, rest = line.partition(" ")  # RFC3339 prefix sorts chronologically
+                merged.append((ts, f"[{short}] {rest}"))
+        except Exception as e:
+            merged.append(("", f"[{short}] <log error: {e}>"))
+    merged.sort(key=lambda x: x[0])
+    return {"logs": "\n".join(m[1] for m in merged) or "No worker output yet.",
+            "workers": names, "count": len(merged)}
 
 @app.get("/api/v1/plugins/available")
 def list_available_plugins():
@@ -205,7 +348,7 @@ def list_available_plugins():
             seen.add(uid)
 
     # Map each category to its active ranker name (if any is registered)
-    categories = list(set([p["category"] for p in unique_available] + ["symbol_matching", "cfg_generation", "function_boundary"]))
+    categories = list(set([p["category"] for p in unique_available] + ["signature_matching", "equation_recovery"]))
     ranker_map = {}
     for cat in categories:
         ranker_map[cat] = next((p["name"] for p in unique_available if p["category"] == cat and p["is_ranker"]), "Baseline")
@@ -249,20 +392,28 @@ def _get_plugin_info(root, name, category, docker_data, health_data, now):
     saved = json.loads(state_str) if state_str else {"status": "STOPPED"}
     status = saved["status"]
     
-    # Static discovery: Check if is_validator/is_ranker=True
+    # Static discovery: scan the plugin source for decorator metadata so the
+    # dashboard can show validator/ranker badges + a display name/description
+    # BEFORE the plugin is ever started.
     is_validator = saved.get("is_validator", False)
     is_ranker = saved.get("is_ranker", False)
+    display_name = saved.get("display_name", "")
+    description = saved.get("description", "")
     files = os.listdir(root) if os.path.isdir(root) else []
-    if not is_validator or not is_ranker:
-        for f in files:
-            if f.endswith(".py"):
-                try:
-                    with open(os.path.join(root, f), "r") as pf:
-                        content = pf.read()
-                        if "is_validator=True" in content: is_validator = True
-                        if "is_ranker=True" in content: is_ranker = True
-                        if is_validator and is_ranker: break
-                except: pass
+    for f in files:
+        if not f.endswith(".py"): continue
+        try:
+            with open(os.path.join(root, f), "r") as pf:
+                content = pf.read()
+        except: continue
+        if "is_validator=True" in content: is_validator = True
+        if "is_ranker=True" in content: is_ranker = True
+        if not display_name:
+            m = re.search(r'display_name\s*=\s*["\']([^"\']+)["\']', content)
+            if m: display_name = m.group(1)
+        if not description:
+            m = re.search(r'description\s*=\s*["\']([^"\']+)["\']', content)
+            if m: description = m.group(1)
 
     if unique_id in docker_data:
         d = docker_data[unique_id]
@@ -275,8 +426,10 @@ def _get_plugin_info(root, name, category, docker_data, health_data, now):
             last_beat = w_data["last_heartbeat"]; health_status = "HEALTHY" if (now - last_beat) < 10 else "DEAD"
             if "is_validator" in w_data: is_validator = w_data["is_validator"]
             if "is_ranker" in w_data: is_ranker = w_data["is_ranker"]
-            
-    return {"name": name, "category": category, "status": status, "health": health_status, "last_beat": last_beat, "error": saved.get("error"), "is_validator": is_validator, "is_ranker": is_ranker}
+            if w_data.get("display_name"): display_name = w_data["display_name"]
+            if w_data.get("description"): description = w_data["description"]
+
+    return {"name": name, "category": category, "status": status, "health": health_status, "last_beat": last_beat, "error": saved.get("error"), "is_validator": is_validator, "is_ranker": is_ranker, "display_name": display_name or name, "description": description}
 
 def _plugin_matches(root, name, category):
     static_cat, static_name = get_static_plugin_info(root)
@@ -308,8 +461,8 @@ def get_plugin_path_and_context(name: str, category: str):
     if os.path.exists(default_path):
         return default_path, default_path
 
-    # Plugin directories do not have to match the decorator name. For example,
-    # plugins/cfg_generation/radare declares name="radare_cfg".
+    # Plugin directories do not have to match the decorator name; discovery scans
+    # the source for @xbin.plugin(name=..., category=...) and prefers those.
     for pdir in PLUGIN_DIRS:
         if not os.path.exists(pdir):
             continue
@@ -359,7 +512,25 @@ def bg_start_plugin(name: str, category: str):
         set_plugin_state(name, category, "STARTING")
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
         abs_uploads = os.path.abspath(UPLOAD_DIR)
-        run_cmd = ["docker", "run", "-d", "--name", container_name, "--network", "host", "-v", f"{abs_uploads}:/app/uploads", "-e", "XBIN_ORCHESTRATOR=localhost:50051", "-e", "REDIS_HOST=localhost", "-e", "PYTHONUNBUFFERED=1", image_name]
+        abs_job_outputs = os.path.abspath(CACHE_JOB_OUTPUTS)
+        abs_se_sigdb = os.path.abspath(CACHE_SE_SIGDB)
+        # --shm-size: the pysindy/symbolic_regression dynamic runs boot Cortex-M
+        # firmware under QEMU system mode with a 512M /dev/shm memory-backend-file;
+        # the 64M container default is too small, so give every worker room.
+        run_cmd = ["docker", "run", "-d", "--name", container_name, "--network", "host", "--shm-size=1g",
+                   "-v", f"{abs_uploads}:/app/uploads",
+                   # Persist the reusable analysis caches across restarts so a
+                   # re-run of the same binary skips ghidriff's reference diff and
+                   # bind_se's already-recovered signatures.
+                   "-v", f"{abs_job_outputs}:/home/bind/Morpheus/job_outputs",
+                   "-v", f"{abs_se_sigdb}:/home/bind/Morpheus/signature_matching/signatures/se",
+                   "-e", "XBIN_ORCHESTRATOR=localhost:50051", "-e", "REDIS_HOST=localhost", "-e", "PYTHONUNBUFFERED=1"]
+        # Forward opt-in worker tunables (e.g. the bind_se fork-guard caps) when set.
+        for _var in WORKER_ENV_PASSTHROUGH:
+            _val = os.environ.get(_var)
+            if _val is not None:
+                run_cmd += ["-e", f"{_var}={_val}"]
+        run_cmd.append(image_name)
         subprocess.run(run_cmd, check=True, stdout=subprocess.DEVNULL)
     except Exception as e:
         sys_log(f"Fail {name}: {e}"); set_plugin_state(name, category, "ERROR", error=str(e))
@@ -415,10 +586,113 @@ def get_blackboard_audit(analysis_type: str):
     cat = analysis_type.strip(); audit_key = f"xbin:bb_logs:{cat}"; logs = r.lrange(audit_key, 0, -1)
     return {"logs": "\n".join(logs) if logs else "No history recorded yet."}
 
+def _summary_from_explanation(data):
+    """Pull a clean one-line summary out of a worker's ollama `explanation`.
+
+    Both fid/ghidriff and bind_se already pipe their result through ollama and
+    store a markdown `explanation` beginning with a "Summary of Functionality"
+    section. Reuse that (no new LLM call) so the results table shows readable
+    text instead of raw SMT2. Falls back to the identity/first line.
+    """
+    if not isinstance(data, dict):
+        return str(data)[:200] if data is not None else ""
+    exp = data.get("explanation") or ""
+    if exp:
+        lines = [ln.strip() for ln in exp.replace("\r", "").split("\n")]
+        def _is_header(l):
+            s = l.lstrip("#* ").rstrip(":*# ").lower()
+            return l.startswith("#") or (l.startswith("**") and l.rstrip().endswith(("**", ":", "  "))) or s in (
+                "summary of functionality", "matched known function", "explanation",
+                "recovered expression", "rewritten expression", "recovered smt2")
+        # collect the block right after the "Summary of Functionality" header
+        collected, capturing = [], False
+        for ln in lines:
+            low = ln.lstrip("#* ").rstrip(":*# ").lower()
+            if "summary of functionality" in low:
+                capturing = True; continue
+            if capturing:
+                if not ln:
+                    if collected: break
+                    continue
+                if _is_header(ln):
+                    break
+                collected.append(ln.lstrip("-* ").strip())
+        text = " ".join(collected).strip()
+        if not text:  # header not found: first meaningful non-header line
+            for ln in lines:
+                if ln and not _is_header(ln):
+                    text = ln.lstrip("-* ").strip(); break
+        text = text.replace("**", "").strip()
+        if text:
+            if data.get("known_function"):
+                return f"{data['known_function']} — {text}"
+            return text
+    if data.get("known_function"):
+        return data["known_function"]
+    if data.get("recovered_expression"):
+        return "symbolic expression (open Details for the simplified form)"
+    return (json.dumps(data)[:80] + "…") if data else ""
+
+def _ollama_chat(prompt, max_tokens=200, timeout=45):
+    resp = requests.post(OLLAMA_URL, json={
+        "model": OLLAMA_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens, "temperature": 0.1, "stream": False,
+    }, timeout=timeout)
+    resp.raise_for_status()
+    return resp.json()["choices"][0]["message"]["content"].strip()
+
 @app.get("/api/v1/blackboard/{analysis_type}/results")
 def get_analysis_results(analysis_type: str):
     keys = r.keys(f"xbin:bb:{analysis_type.strip()}:*")
-    return {"results": {k.split(":")[-1]: json.loads(r.get(k)) for k in keys}}
+    results = {}
+    for k in keys:
+        item = json.loads(r.get(k))
+        hyps = item.get("hypotheses") or []
+        # Attach a readable one-liner (reuses the worker's ollama explanation, no
+        # new LLM call) so the table never shows raw SMT2.
+        item["display_summary"] = _summary_from_explanation(hyps[0].get("data")) if hyps else ""
+        results[k.split(":")[-1]] = item
+    return {"results": results}
+
+@app.get("/api/v1/blackboard/{analysis_type}/{item_key}/summary")
+def get_result_summary(analysis_type: str, item_key: str):
+    """Pipe the top hypothesis through ollama for a concise result:
+    a simplified expression (equation_recovery) or a plain-language description
+    of the identified function (signature_matching). Cached per hypothesis id;
+    degrades gracefully to the parsed explanation if ollama is unavailable.
+    """
+    cat = analysis_type.strip()
+    state_str = r.get(f"xbin:bb:{cat}:{item_key}")
+    if not state_str:
+        raise HTTPException(status_code=404)
+    state = json.loads(state_str)
+    hyps = state.get("hypotheses") or []
+    if not hyps:
+        return {"summary": ""}
+    top = hyps[0]; data = top.get("data") or {}; hyp_id = top.get("id")
+    cache_key = f"xbin:summary:{cat}:{item_key}"
+    cached = r.get(cache_key)
+    if cached:
+        c = json.loads(cached)
+        if c.get("hyp_id") == hyp_id:
+            return {"summary": c["text"], "cached": True}
+    if isinstance(data, dict) and data.get("known_function"):
+        prompt = (f"In one or two plain sentences, describe what the function "
+                  f"'{data['known_function']}' does. No preamble, no code.")
+    elif isinstance(data, dict) and data.get("recovered_expression"):
+        prompt = ("Rewrite this SMT2 bit-vector expression as a concise, human-readable "
+                  "formula (or a one-line plain-English description of what it computes). "
+                  "Output ONLY the simplified result, no preamble, no raw SMT2:\n\n"
+                  f"{data['recovered_expression']}")
+    else:
+        return {"summary": _summary_from_explanation(data)}
+    try:
+        text = _ollama_chat(prompt)
+        r.set(cache_key, json.dumps({"hyp_id": hyp_id, "text": text}), ex=86400)
+        return {"summary": text, "cached": False}
+    except Exception as e:
+        return {"summary": _summary_from_explanation(data), "error": str(e)}
 
 @app.get("/api/v1/blackboard/{analysis_type}/{item_key}/consensus")
 def get_consensus(analysis_type: str, item_key: str):
@@ -444,7 +718,8 @@ def dashboard():
     <html>
     <head>
         <title>xbin | Visual Analysis Dashboard</title>
-        <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.26.0/cytoscape.min.js"></script>
+        <!-- No external assets: the page must load fully self-contained over plain
+             HTTP from a remote browser (the old Cytoscape CDN was unused/dead). -->
         <style>
             :root { --bg: #0b0f1a; --card: #161e2e; --text: #f3f4f6; --accent: #3b82f6; --danger: #ef4444; --success: #10b981; --warning: #f59e0b; --muted: #6b7280; --border: #2d3748; }
             body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
@@ -496,6 +771,7 @@ def dashboard():
             </div>
             <div style="display: flex; gap: 1rem; align-items: center;">
                 <button class="btn" style="background: #2d3748;" onclick="showSystemLogs()">System Logs</button>
+                <button class="btn" style="background: #2d3748;" onclick="showWorkerLogs()">Worker Deep Dive</button>
                 <button class="btn btn-danger btn-action" onclick="clearSession()">Clear Session</button>
                 <button class="btn btn-primary btn-action" onclick="bulkAction('start')">Start Fleet</button>
                 <button class="btn btn-danger btn-action" onclick="powerOff()">Power Off</button>
@@ -506,13 +782,20 @@ def dashboard():
             <aside class="sidebar">
                 <div class="card">
                     <h2>Deploy Analysis</h2>
-                    <input type="file" id="f" style="display:none" onchange="document.getElementById('fl').innerText=this.files[0].name">
+                    <input type="file" id="f" style="display:none" onchange="document.getElementById('fl').innerText=this.files[0].name; loadReferences(this.files[0].name)">
                     <button class="btn btn-primary" style="width:100%" onclick="document.getElementById('f').click()">📁 <span id="fl">Choose Binary</span></button>
+                    <div style="margin-top:1rem;">
+                        <label style="font-size:0.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em;">Reference Binary <span style="text-transform:none; color:var(--muted)">(server-selected)</span></label>
+                        <select id="refsel" onchange="onRefSelChange(this)" style="width:100%; margin-top:0.3rem; padding:0.5rem; background:#0b0f1a; color:var(--text); border:1px solid var(--border); border-radius:8px; font-size:0.8rem;">
+                            <option value="">Baked default (arducopter)</option>
+                        </select>
+                        <input type="file" id="ref" style="display:none" onchange="onCustomRef(this)">
+                        <div id="refl" style="font-size:0.62rem; color:var(--muted); margin-top:0.25rem;"></div>
+                    </div>
                     <div style="margin-top:1rem; padding-top:1rem; border-top:1px solid var(--border);">
                         <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.4rem;">
-                            <label style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;"><input type="checkbox" class="goal" value="symbol_matching" checked> Symbols</label>
-                            <label style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;"><input type="checkbox" class="goal" value="cfg_generation" checked> CFG</label>
-                            <label style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;"><input type="checkbox" class="goal" value="function_boundary" checked> Boundaries</label>
+                            <label style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;"><input type="checkbox" class="goal" value="signature_matching" checked> Signature Matching</label>
+                            <label style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;"><input type="checkbox" class="goal" value="equation_recovery" checked> Equation Recovery</label>
                         </div>
                     </div>
                     <button class="btn btn-primary" style="width:100%; margin-top:1rem; background:var(--success)" onclick="upload()">🚀 Start Analysis</button>
@@ -538,9 +821,68 @@ def dashboard():
         <div class="toast-container" id="toasts"></div>
         <script>
             let lastHeartbeats = {};
+            // ---- Live log tail (shared by System Logs + Worker Deep Dive) ----
+            let logTimer = null;
+            function stopLiveTail() {
+                if (logTimer) { clearInterval(logTimer); logTimer = null; }
+                const lg = document.getElementById('modal-legend'); if (lg) lg.innerHTML = '';
+            }
+            // fetchFn: async () => log-text string ; ms: poll cadence
+            function startLiveTail(fetchFn, ms) {
+                stopLiveTail();
+                const el = document.getElementById('modal-content');
+                document.getElementById('modal-legend').innerHTML =
+                    '<span style="color:var(--success); animation:blink 1.5s infinite;">● LIVE</span>';
+                let first = true;
+                const tick = async () => {
+                    if (document.getElementById('modal').style.display === 'none') { stopLiveTail(); return; }
+                    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+                    try { el.innerText = (await fetchFn()) || 'No output yet.'; }   // innerText: no XSS from log bytes
+                    catch (e) { el.innerText = 'Error loading logs: ' + e.message; }
+                    if (first || nearBottom) el.scrollTop = el.scrollHeight;        // auto-scroll unless user scrolled up
+                    first = false;
+                };
+                tick();
+                logTimer = setInterval(tick, ms);
+            }
+            const CAT_LABELS = { signature_matching: 'Signature Matching', equation_recovery: 'Equation Recovery' };
+            function catLabel(c) { return CAT_LABELS[c] || c.replace(/_/g,' '); }
             function toast(m) { const t=document.createElement('div'); t.className='toast'; t.innerText=m; document.getElementById('toasts').appendChild(t); setTimeout(()=>t.remove(),3000); }
+            async function loadReferences(target) {
+                try {
+                    const res = await fetch('/api/v1/references?target=' + encodeURIComponent(target||''));
+                    const d = await res.json();
+                    const sel = document.getElementById('refsel');
+                    let html = '<option value="">Baked default (arducopter)</option>';
+                    (d.references||[]).forEach(n => { html += `<option value="${n}">${n}</option>`; });
+                    html += '<option value="__custom__">Upload custom file…</option>';
+                    sel.innerHTML = html;
+                    sel.value = d.suggested || '';
+                    document.getElementById('ref').value = '';
+                    document.getElementById('refl').innerText = d.suggested ? ('auto-selected: ' + d.suggested) : '';
+                } catch(e) {}
+            }
+            function onRefSelChange(sel) {
+                const label = document.getElementById('refl');
+                if (sel.value === '__custom__') { document.getElementById('ref').click(); }
+                else { document.getElementById('ref').value = ''; label.innerText = sel.value ? ('using: ' + sel.value) : 'using baked default'; }
+            }
+            function onCustomRef(inp) {
+                const label = document.getElementById('refl');
+                if (inp.files[0]) { label.innerText = 'custom: ' + inp.files[0].name; }
+                else { document.getElementById('refsel').value = ''; label.innerText = 'using baked default'; }
+            }
             async function upload() {
-                const fd=new FormData(); fd.append('file', document.getElementById('f').files[0]);
+                const f = document.getElementById('f').files[0];
+                if (!f) { toast('Choose a binary first'); return; }
+                const fd=new FormData(); fd.append('file', f);
+                const sel = document.getElementById('refsel').value;
+                if (sel === '__custom__') {
+                    const ref=document.getElementById('ref').files[0];
+                    if(ref) fd.append('reference', ref);
+                } else if (sel) {
+                    fd.append('reference_name', sel);
+                }
                 const goals=Array.from(document.querySelectorAll('.goal:checked')).map(i=>i.value);
                 fd.append('requested_analyses', goals.join(','));
                 await fetch('/api/v1/upload', {method:'POST', body:fd}); toast('Binary Announced');
@@ -569,6 +911,7 @@ def dashboard():
                 });
             }
             async function showLogs(n, c="") {
+                stopLiveTail();
                 document.getElementById('modal-title').innerText=`Logs: ${n}`;
                 document.getElementById('cy-container').style.display='none'; document.getElementById('mem-map-container').style.display='none';
                 document.getElementById('modal-content').style.display='block'; document.getElementById('overlay').style.display='block'; document.getElementById('modal').style.display='flex';
@@ -578,16 +921,80 @@ def dashboard():
             function showSystemLogs() {
                 document.getElementById('modal-title').innerText='System Logs';
                 document.getElementById('cy-container').style.display='none'; document.getElementById('mem-map-container').style.display='none';
-                document.getElementById('modal-legend').innerHTML = ''; document.getElementById('modal-content').style.display='block';
+                document.getElementById('modal-content').style.display='block';
                 document.getElementById('overlay').style.display='block'; document.getElementById('modal').style.display='flex';
-                fetch('/api/v1/system/logs').then(r=>r.json()).then(d=>document.getElementById('modal-content').innerText=d.logs);
+                document.getElementById('modal-content').innerText = 'Loading...';
+                startLiveTail(async () => {
+                    const res = await fetch('/api/v1/system/logs');
+                    const d = await res.json();
+                    return d.logs;
+                }, 2000);
+            }
+            function showWorkerLogs() {
+                document.getElementById('modal-title').innerText='Worker Deep Dive (all containers)';
+                document.getElementById('cy-container').style.display='none'; document.getElementById('mem-map-container').style.display='none';
+                document.getElementById('modal-content').style.display='block';
+                document.getElementById('overlay').style.display='block'; document.getElementById('modal').style.display='flex';
+                document.getElementById('modal-content').innerText = 'Loading...';
+                startLiveTail(async () => {
+                    const res = await fetch('/api/v1/workers/logs?tail=80');
+                    const d = await res.json();
+                    return d.logs;
+                }, 3000);
             }
             function showBlackboardLogs(cat) {
+                stopLiveTail();
                 document.getElementById('modal-title').innerText=`Audit Trail: ${cat}`;
                 document.getElementById('cy-container').style.display='none'; document.getElementById('mem-map-container').style.display='none';
                 document.getElementById('modal-legend').innerHTML = ''; document.getElementById('modal-content').style.display='block';
                 document.getElementById('overlay').style.display='block'; document.getElementById('modal').style.display='flex';
                 fetch(`/api/v1/blackboard/${cat}/audit`).then(r=>r.json()).then(d=>document.getElementById('modal-content').innerText=d.logs || 'No entries.');
+            }
+            async function showExplanation(cat, item) {
+                stopLiveTail();
+                document.getElementById('modal-title').innerText = `${catLabel(cat)}: ${item}`;
+                document.getElementById('cy-container').style.display='none';
+                document.getElementById('mem-map-container').style.display='none';
+                document.getElementById('modal-legend').innerHTML = '';
+                const content = document.getElementById('modal-content');
+                content.style.display='block';
+                document.getElementById('overlay').style.display='block';
+                document.getElementById('modal').style.display='flex';
+                content.innerText = 'Simplifying via ollama…';
+                try {
+                    const res = await fetch(`/api/v1/blackboard/${cat}/results`);
+                    const d = await res.json();
+                    const entry = (d.results || {})[item];
+                    if (!entry || !entry.hypotheses || !entry.hypotheses.length) { content.innerText = 'No data.'; return; }
+                    const lines = [];
+                    // Headline: the ollama-simplified result (simpler expression, or a
+                    // description for a signature match). Falls back to display_summary.
+                    let simplified = entry.display_summary || '';
+                    try {
+                        const sRes = await fetch(`/api/v1/blackboard/${cat}/${encodeURIComponent(item)}/summary`);
+                        const sD = await sRes.json();
+                        if (sD.summary) simplified = sD.summary;
+                    } catch (e) {}
+                    if (simplified) {
+                        lines.push('┌─ Simplified (ollama) ' + '─'.repeat(38));
+                        lines.push(simplified);
+                        lines.push('└' + '─'.repeat(59));
+                        lines.push('');
+                    }
+                    entry.hypotheses.forEach((h, i) => {
+                        const data = h.data || {};
+                        lines.push('='.repeat(60));
+                        lines.push(`#${i+1}  via ${h.backend}   score=${h.score}   raw_conf=${h.raw_conf}`);
+                        if ((h.validators||[]).length) lines.push(`vouched by: ${h.validators.join(', ')}`);
+                        if (data.known_function) lines.push(`Identity: ${data.known_function}` + (data.confidence!=null?`  (conf ${data.confidence})`:''));
+                        if (data.matchers) lines.push(`Matchers: ${(data.matchers||[]).join(', ')}`);
+                        if (data.explanation) lines.push(`\nExplanation:\n${data.explanation}`);
+                        if (data.recovered_expression) lines.push(`\nRaw SMT2:\n${data.recovered_expression}`);
+                        if (data.output_dir) lines.push(`Output: ${data.output_dir}`);
+                        lines.push('');
+                    });
+                    content.innerText = lines.join('\\n');
+                } catch (e) { content.innerText = `Error: ${e.message}`; }
             }
             async function showConsensus(cat, item) {
                 const modal = document.getElementById('modal'); const overlay = document.getElementById('overlay');
@@ -651,8 +1058,23 @@ def dashboard():
                 });
             }
             function hex(n) { return '0x' + n.toString(16); }
-            function copyLogs() { navigator.clipboard.writeText(document.getElementById('modal-content').innerText); toast('Copied!'); }
-            function closeModal() { document.getElementById('modal').style.display='none'; document.getElementById('overlay').style.display='none'; }
+            function copyLogs() {
+                const text = document.getElementById('modal-content').innerText;
+                // navigator.clipboard is undefined on non-secure origins (plain HTTP
+                // via direct IP), so fall back to a hidden textarea + execCommand.
+                if (navigator.clipboard && window.isSecureContext) {
+                    navigator.clipboard.writeText(text).then(()=>toast('Copied!'), ()=>fallbackCopy(text));
+                } else { fallbackCopy(text); }
+            }
+            function fallbackCopy(text) {
+                const ta = document.createElement('textarea');
+                ta.value = text; ta.style.position='fixed'; ta.style.opacity='0';
+                document.body.appendChild(ta); ta.focus(); ta.select();
+                try { toast(document.execCommand('copy') ? 'Copied!' : 'Copy failed — select manually'); }
+                catch(e) { toast('Copy failed — select manually'); }
+                document.body.removeChild(ta);
+            }
+            function closeModal() { stopLiveTail(); document.getElementById('modal').style.display='none'; document.getElementById('overlay').style.display='none'; }
             let collapsedCategories = {};
             function toggleCategory(cat) {
                 collapsedCategories[cat] = !collapsedCategories[cat];
@@ -676,11 +1098,11 @@ def dashboard():
                     let html = '';
                     for(let cat in cats) {
                         const isCollapsed = collapsedCategories[cat];
-                        html += `<div style="display:flex; justify-content:space-between; align-items:center; margin:1.5rem 0 0.5rem; cursor:pointer; user-select:none;" onclick="toggleCategory('${cat}')"><div style="font-size:0.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.1em; font-weight:700;"><span id="cat-arrow-${cat}" style="display:inline-block; transition:transform 0.2s; transform:${isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)'};">&#9660;</span> ${cat.replace('_',' ')}</div><div style="display:flex; gap:0.25rem" onclick="event.stopPropagation()"><button class="btn btn-action" onclick="bulkAction('stop', '${cat}')">Stop</button><button class="btn btn-primary btn-action" onclick="bulkAction('start', '${cat}')">Start</button></div></div>`;
+                        html += `<div style="display:flex; justify-content:space-between; align-items:center; margin:1.5rem 0 0.5rem; cursor:pointer; user-select:none;" onclick="toggleCategory('${cat}')"><div style="font-size:0.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.1em; font-weight:700;"><span id="cat-arrow-${cat}" style="display:inline-block; transition:transform 0.2s; transform:${isCollapsed ? 'rotate(-90deg)' : 'rotate(0deg)'};">&#9660;</span> ${catLabel(cat)}</div><div style="display:flex; gap:0.25rem" onclick="event.stopPropagation()"><button class="btn btn-action" onclick="bulkAction('stop', '${cat}')">Stop</button><button class="btn btn-primary btn-action" onclick="bulkAction('start', '${cat}')">Start</button></div></div>`;
                         html += `<div id="cat-content-${cat}" style="display:${isCollapsed ? 'none' : 'block'};">`;
                         cats[cat].forEach(p => {
                             const isNewBeat = p.last_beat > (lastHeartbeats[p.name] || 0);
-                            html += `<div class="plugin-item" id="card-${p.name}"><div id="beat-${p.name}" class="heartbeat-ping ${isNewBeat ? 'ping-active' : ''}"></div><div style="display:flex; justify-content:space-between; align-items:start"><div><div style="font-weight:bold">${p.name}</div><div style="display:flex; align-items:center; gap:0.3rem; margin-top:0.2rem"><div class="badge badge-${p.status==='RUNNING'?'running':p.status==='STOPPED'?'stopped':'error'}">${p.status}</div>${p.is_validator ? '<div class="badge badge-validator">Validator</div>' : ''}${p.is_ranker ? '<div class="badge badge-ranker" style="font-style:normal;">Ranker</div>' : ''}${p.health==='HEALTHY'?'<span style="color:var(--success); font-size:0.6rem; font-weight:bold">READY</span>':''}</div></div><div style="display:flex; flex-direction:column; gap:0.2rem"><button class="btn btn-action ${p.status==='RUNNING'?'btn-danger':'btn-primary'}" onclick="toggle('${p.name}','${p.category}','${p.status}')">${p.status==='RUNNING'?'Stop':'Start'}</button><button class="btn btn-action" style="background:#2d3748" onclick="showLogs('${p.name}','${p.category}')">Logs</button></div></div>${p.error ? `<div style="font-size:0.6rem; color:var(--danger); margin-top:0.3rem; border-top:1px solid rgba(239,68,68,0.1); padding-top:0.2rem">${p.error}</div>` : ''}</div>`;
+                            html += `<div class="plugin-item" id="card-${p.name}"><div id="beat-${p.name}" class="heartbeat-ping ${isNewBeat ? 'ping-active' : ''}"></div><div style="display:flex; justify-content:space-between; align-items:start"><div style="flex:1; min-width:0"><div style="font-weight:bold">${p.display_name || p.name}</div><div style="font-size:0.6rem; color:var(--muted); font-family:monospace">${p.name}</div><div style="display:flex; align-items:center; gap:0.3rem; margin-top:0.2rem; flex-wrap:wrap"><div class="badge badge-${p.status==='RUNNING'?'running':p.status==='STOPPED'?'stopped':'error'}">${p.status}</div>${p.is_validator ? '<div class="badge badge-validator">Validator</div>' : ''}${p.is_ranker ? '<div class="badge badge-ranker" style="font-style:normal;">Ranker</div>' : ''}${p.health==='HEALTHY'?'<span style="color:var(--success); font-size:0.6rem; font-weight:bold">READY</span>':''}</div>${p.description ? '<div style="font-size:0.62rem; color:var(--muted); margin-top:0.35rem; line-height:1.3">'+p.description+'</div>' : ''}</div><div style="display:flex; flex-direction:column; gap:0.2rem"><button class="btn btn-action ${p.status==='RUNNING'?'btn-danger':'btn-primary'}" onclick="toggle('${p.name}','${p.category}','${p.status}')">${p.status==='RUNNING'?'Stop':'Start'}</button><button class="btn btn-action" style="background:#2d3748" onclick="showLogs('${p.name}','${p.category}')">Logs</button></div></div>${p.error ? `<div style="font-size:0.6rem; color:var(--danger); margin-top:0.3rem; border-top:1px solid rgba(239,68,68,0.1); padding-top:0.2rem">${p.error}</div>` : ''}</div>`;
                             if (isNewBeat) lastHeartbeats[p.name] = p.last_beat;
                         });
                         html += `</div>`;
@@ -688,21 +1110,27 @@ def dashboard():
                     if (pluginList.innerHTML !== html) pluginList.innerHTML = html;
                     const bb = document.getElementById('bb-content');
                     const rankers = pData.rankers || {};
-                    const categories = [...new Set([...pData.plugins.map(p => p.category), 'symbol_matching', 'cfg_generation', 'function_boundary'])];
+                    const categories = [...new Set([...pData.plugins.map(p => p.category), 'signature_matching', 'equation_recovery'])];
                     for (let cat of categories) {
                         const res = await fetch(`/api/v1/blackboard/${cat}/results`); const d = await res.json();
                         let catId = `bb-section-${cat}`; let section = document.getElementById(catId);
                         if (Object.keys(d.results).length > 0) {
                             if (!section) { section = document.createElement('div'); section.id = catId; section.className = 'card'; bb.appendChild(section); }
-                            const rankerName = rankers[cat] || "DefaultWeightedRanker";
-                            let tableHtml = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;"><div><h2 style="display:inline; margin-right:1rem;">${cat.replace('_',' ')}</h2><div class="badge badge-ranker" style="display:inline; vertical-align:middle;">Ranker: ${rankerName}</div></div><div style="display:flex; gap:0.5rem;"><button class="btn btn-action" onclick="showBlackboardLogs('${cat}')">Audit Trail</button>${cat==='function_boundary'?'<button class="btn btn-primary btn-action" onclick=\\'visualizeBoundaries('+JSON.stringify(d.results)+')\\'>View Map</button>':''}</div></div><table><thead><tr><th>${cat==='function_boundary'?'Address':'Target'}</th><th>${cat==='function_boundary'?'End / Size':'Result'}</th><th>Action</th></tr></thead><tbody>`;
-                            for(let k in d.results) { 
+                            const rankerName = rankers[cat] || "Baseline";
+                            let tableHtml = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;"><div><h2 style="display:inline; margin-right:1rem;">${catLabel(cat)}</h2><div class="badge badge-ranker" style="display:inline; vertical-align:middle;">Ranker: ${rankerName}</div></div><div style="display:flex; gap:0.5rem;"><button class="btn btn-action" onclick="showBlackboardLogs('${cat}')">Audit Trail</button></div></div><table><thead><tr><th>Function</th><th>Result</th><th>Detail</th></tr></thead><tbody>`;
+                            for(let k in d.results) {
                                 const item = d.results[k]; const top = item.hypotheses[0];
                                 const validators = top.validators || [];
                                 const vCount = validators.length;
-                                let resText = cat === 'function_boundary' ? `${top.data.end} (${top.data.size}b)` : (typeof top.data === 'string' ? top.data : JSON.stringify(top.data).substring(0,30)+'...');
+                                const data = top.data || {};
+                                // Prefer the server-computed readable summary (ollama-derived);
+                                // never show raw SMT2 in the results table.
+                                let resText = item.display_summary
+                                    || ((typeof top.data === 'string') ? top.data
+                                        : (data.known_function || JSON.stringify(data).substring(0,40)+'...'));
+                                resText = String(resText).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
                                 const vList = vCount ? `Vouched by: ${validators.join(', ')}` : 'No validations yet';
-                                tableHtml += `<tr class="bb-row"><td><code>${k}</code></td><td style="color:var(--accent); font-weight:500;">${vCount ? '<span style="color:var(--success); margin-right:0.3rem;" title="'+vList+'">✓</span>' : ''}${resText}</td><td>${cat==='cfg_generation'?'<button class="btn btn-primary btn-action" onclick="showConsensus(\\''+cat+'\\',\\''+k+'\\')">Visual Graph</button>':''} <span style="font-size:0.6rem; color:var(--muted)">via ${top.backend}${vCount ? ` <span style="color:var(--success); cursor:help;" title="${vList}">+${vCount} vouches</span>` : ''} (Score: ${top.score})</span></td></tr>`; 
+                                tableHtml += `<tr class="bb-row"><td><code>${k}</code></td><td style="color:var(--accent); font-weight:500;">${vCount ? '<span style="color:var(--success); margin-right:0.3rem;" title="'+vList+'">✓</span>' : ''}${resText}</td><td><button class="btn btn-primary btn-action" onclick="showExplanation('${cat}','${k}')">Details</button> <span style="font-size:0.6rem; color:var(--muted)">via ${top.backend}${vCount ? ` <span style="color:var(--success); cursor:help;" title="${vList}">+${vCount} vouches</span>` : ''} (Score: ${top.score})</span></td></tr>`;
                             }
                             tableHtml += '</tbody></table>';
                             if (section.innerHTML !== tableHtml) { section.innerHTML = tableHtml; section.style.animation = 'glow-pulse 0.5s ease-out'; }
@@ -720,7 +1148,7 @@ def dashboard():
                     }
                 }
             }
-            setInterval(refresh, 2000); refresh();
+            setInterval(refresh, 2000); refresh(); loadReferences('');
         </script>
     </body>
     </html>
@@ -733,18 +1161,22 @@ class XbinOrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServiceServicer
     def RegisterWorker(self, request, context):
         r.hset("xbin:active_workers", request.worker_id, f"{request.analysis_type}:{request.backend_name}")
         r.hset("xbin:worker_health", request.worker_id, json.dumps({
-            "backend": request.backend_name, 
-            "last_heartbeat": time.time(), 
+            "backend": request.backend_name,
+            "last_heartbeat": time.time(),
             "message": "Welcome Signal Received",
             "is_validator": request.is_validator,
-            "is_ranker": request.is_ranker
+            "is_ranker": request.is_ranker,
+            "display_name": request.display_name,
+            "description": request.description
         }))
-        
+
         # Persist type status in long-term plugin state
         state_key = f"xbin:plugin_state:{request.analysis_type}:{request.backend_name}"
         state = json.loads(r.get(state_key)) if r.exists(state_key) else {"status": "RUNNING"}
         state["is_validator"] = request.is_validator
         state["is_ranker"] = request.is_ranker
+        if request.display_name: state["display_name"] = request.display_name
+        if request.description: state["description"] = request.description
         r.set(state_key, json.dumps(state))
 
         type_str = "[VALIDATOR]" if request.is_validator else "[RANKER]" if request.is_ranker else ""
@@ -782,8 +1214,8 @@ class XbinOrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServiceServicer
                     target_hyp["validators"].append(request.backend_name)
                     target_hyp["score"] = round(target_hyp["score"] + (request.confidence * weight), 3)
                     log_entry = f"[{timestamp}] {request.backend_name} VOUCHED for {request.item_key} (ID: {target_hyp.get('id')})"
-                    r.lpush(audit_key, log_entry); r.ltrim(audit_key, 0, 100)
-                    sys_log(f"Validation: {request.backend_name} -> {request.item_key}")
+                    r.lpush(audit_key, log_entry); r.ltrim(audit_key, 0, 4999)
+                    sys_log(f"Validation: {request.backend_name} -> {cat}/{request.item_key} (score {target_hyp['score']})")
                 new_hyp = target_hyp # For the event broadcast
             else:
                 return orchestrator_pb2.PostResultResponse(accepted=False, current_status="TARGET_NOT_FOUND")
@@ -811,7 +1243,13 @@ class XbinOrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServiceServicer
                 }
                 state["hypotheses"].append(new_hyp)
                 log_entry = f"[{timestamp}] {request.backend_name} -> {request.item_key} (New Hypothesis)"
-                r.lpush(audit_key, log_entry); r.ltrim(audit_key, 0, 100)
+                r.lpush(audit_key, log_entry); r.ltrim(audit_key, 0, 4999)
+                # Verbose per-function progress into the System Logs stream so the
+                # live viewer shows results landing one function at a time.
+                _d = data if isinstance(data, dict) else {}
+                _summary = (_d.get("known_function") or _d.get("recovered_expression")
+                            or (_d.get("explanation", "")[:60]) or "result")
+                sys_log(f"Result: {request.backend_name} -> {cat}/{request.item_key} = {_summary} (conf {round(request.confidence, 3)})")
 
         # Re-sort and determine status
         state["hypotheses"] = sorted(state["hypotheses"], key=lambda x: x["score"], reverse=True)
