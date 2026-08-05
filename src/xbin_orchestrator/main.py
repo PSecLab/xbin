@@ -43,29 +43,13 @@ REST_PORT = 8000
 # workers/arbiter use. Reached over --network host at 127.0.0.1.
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://127.0.0.1:11434/v1/chat/completions")
 OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "qwen2.5-coder:7b")
-DEFAULT_PLUGINS_DIR = os.getenv("XBIN_PLUGINS_DIR", "plugins")
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
+DEFAULT_PLUGINS_DIR = os.getenv("XBIN_PLUGINS_DIR") or os.path.join(_REPO_ROOT, "plugins")
 PLUGIN_DIRS = [DEFAULT_PLUGINS_DIR]
 EXPLICIT_PLUGINS = []
-UPLOAD_DIR = "uploads"
-# Server-side library of symbolized reference binaries (betaflight, arducopter,
-# ...). The user picks one from a dropdown instead of uploading a reference every
-# time; the chosen file is copied to uploads/<target-stem>.reference so the BIND
-# plugins pick it up via bind_helpers.sibling(). Drop more *.reference ELFs here
-# to extend the menu.
-REFERENCE_DIR = "references"
-
-# Persistent per-analysis cache on the big disk, mounted into every worker so the
-# expensive artifacts survive a fleet restart (and are reused on a re-run of the
-# same binary -- e.g. a demo). Two sinks the Morpheus tools reuse across runs:
-#   job_outputs/  -> ghidriff's whole-program diff cache (skips re-diffing the
-#                    multi-MB reference when its <ref>-<target>_diff.json exists)
-#                    + fid's Ghidra project + symbolic_regression outputs.
-#   se_sigdb/     -> bind_se's growing signature DB (skips angr + LLM for
-#                    already-recovered signatures).
-# Both baked dirs are empty in bind:latest, so mounting over them hides nothing.
-# (bind_se's angr rtdb and pysindy's outputs already land under uploads/, which is
-# likewise persisted.) Keeping the fleet warm between runs reuses these too.
-CACHE_DIR = "cache"
+UPLOAD_DIR = os.getenv("XBIN_UPLOAD_DIR") or os.path.join(_REPO_ROOT, "uploads")
+REFERENCE_DIR = os.getenv("XBIN_REFERENCE_DIR") or os.path.join(_REPO_ROOT, "references")
+CACHE_DIR = os.getenv("XBIN_CACHE_DIR") or os.path.join(_REPO_ROOT, "cache")
 
 # Scratch/temp on the big disk, NOT root. This server's /tmp lives on the small
 # root filesystem (~50G free); the repo (and Docker's data-root) live on the
@@ -99,6 +83,14 @@ WORKER_ENV_PASSTHROUGH = tuple(
 BACKEND_WEIGHTS = {
     "fid": 1.0,                  # Ghidra FunctionID signature matching
     "ghidriff": 0.95,           # Ghidra ghidriff / BSim binary diffing
+    "flirt_matcher": 0.95,       # IDA FLIRT signature matching
+    "angr_cfg": 0.90,           # angr CFG generation
+    "radare_cfg": 0.85,         # radare2 CFG generation
+    "angr_boundaries": 0.90,    # angr function boundary discovery
+    "radare_boundaries": 0.85,  # radare2 function boundary discovery
+    "binja": 1.0,               # Binary Ninja boundary discovery
+    "boundary_ranker": 1.0,     # Boundary ranker
+    "boundary_validator": 1.0,  # Boundary validator
     "symbolic_regression": 0.90, # PySR symbolic regression + ollama explanation (highest-priority recoverer)
     "bind_se": 0.85,            # angr symbolic execution + ollama explanation
     "pysindy": 0.85,            # BIND binary->equation (Binja structure + numpy STLSQ sparse regression)
@@ -349,7 +341,7 @@ def list_available_plugins():
             seen.add(uid)
 
     # Map each category to its active ranker name (if any is registered)
-    categories = list(set([p["category"] for p in unique_available] + ["signature_matching", "equation_recovery"]))
+    categories = list(set([p["category"] for p in unique_available] + ["signature_matching", "equation_recovery", "cfg_generation", "function_boundary", "symbol_matching"]))
     ranker_map = {}
     for cat in categories:
         ranker_map[cat] = next((p["name"] for p in unique_available if p["category"] == cat and p["is_ranker"]), "Baseline")
@@ -739,6 +731,7 @@ def dashboard():
         <title>xbin | Visual Analysis Dashboard</title>
         <!-- No external assets: the page must load fully self-contained over plain
              HTTP from a remote browser (the old Cytoscape CDN was unused/dead). -->
+        <script src="https://cdnjs.cloudflare.com/ajax/libs/cytoscape/3.26.0/cytoscape.min.js"></script>
         <style>
             :root { --bg: #0b0f1a; --card: #161e2e; --text: #f3f4f6; --accent: #3b82f6; --danger: #ef4444; --success: #10b981; --warning: #f59e0b; --muted: #6b7280; --border: #2d3748; }
             body { font-family: 'Inter', sans-serif; background: var(--bg); color: var(--text); margin: 0; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
@@ -815,6 +808,9 @@ def dashboard():
                         <div style="display:grid; grid-template-columns: 1fr 1fr; gap:0.4rem;">
                             <label style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;"><input type="checkbox" class="goal" value="signature_matching" checked> Signature Matching</label>
                             <label style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;"><input type="checkbox" class="goal" value="equation_recovery" checked> Equation Recovery</label>
+                            <label style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;"><input type="checkbox" class="goal" value="cfg_generation" checked> CFG Generation</label>
+                            <label style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;"><input type="checkbox" class="goal" value="function_boundary" checked> Boundaries</label>
+                            <label style="font-size:0.75rem; display:flex; align-items:center; gap:0.3rem;"><input type="checkbox" class="goal" value="symbol_matching" checked> Symbols</label>
                         </div>
                     </div>
                     <button class="btn btn-primary" style="width:100%; margin-top:1rem; background:var(--success)" onclick="upload()">🚀 Start Analysis</button>
@@ -864,7 +860,7 @@ def dashboard():
                 tick();
                 logTimer = setInterval(tick, ms);
             }
-            const CAT_LABELS = { signature_matching: 'Signature Matching', equation_recovery: 'Equation Recovery' };
+            const CAT_LABELS = { signature_matching: 'Signature Matching', equation_recovery: 'Equation Recovery', cfg_generation: 'CFG Generation', function_boundary: 'Function Boundaries', symbol_matching: 'Symbol Matching' };
             function catLabel(c) { return CAT_LABELS[c] || c.replace(/_/g,' '); }
             function toast(m) { const t=document.createElement('div'); t.className='toast'; t.innerText=m; document.getElementById('toasts').appendChild(t); setTimeout(()=>t.remove(),3000); }
             async function loadReferences(target) {
@@ -1129,14 +1125,14 @@ def dashboard():
                     if (pluginList.innerHTML !== html) pluginList.innerHTML = html;
                     const bb = document.getElementById('bb-content');
                     const rankers = pData.rankers || {};
-                    const categories = [...new Set([...pData.plugins.map(p => p.category), 'signature_matching', 'equation_recovery'])];
+                    const categories = [...new Set([...pData.plugins.map(p => p.category), 'signature_matching', 'equation_recovery', 'cfg_generation', 'function_boundary', 'symbol_matching'])];
                     for (let cat of categories) {
                         const res = await fetch(`/api/v1/blackboard/${cat}/results`); const d = await res.json();
                         let catId = `bb-section-${cat}`; let section = document.getElementById(catId);
                         if (Object.keys(d.results).length > 0) {
                             if (!section) { section = document.createElement('div'); section.id = catId; section.className = 'card'; bb.appendChild(section); }
                             const rankerName = rankers[cat] || "Baseline";
-                            let tableHtml = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;"><div><h2 style="display:inline; margin-right:1rem;">${catLabel(cat)}</h2><div class="badge badge-ranker" style="display:inline; vertical-align:middle;">Ranker: ${rankerName}</div></div><div style="display:flex; gap:0.5rem;"><button class="btn btn-action" onclick="showBlackboardLogs('${cat}')">Audit Trail</button></div></div><table><thead><tr><th>Function</th><th>Result</th><th>Detail</th></tr></thead><tbody>`;
+                            let tableHtml = `<div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:1rem;"><div><h2 style="display:inline; margin-right:1rem;">${catLabel(cat)}</h2><div class="badge badge-ranker" style="display:inline; vertical-align:middle;">Ranker: ${rankerName}</div></div><div style="display:flex; gap:0.5rem;"><button class="btn btn-action" onclick="showBlackboardLogs('${cat}')">Audit Trail</button>${cat==='function_boundary'?'<button class="btn btn-primary btn-action" onclick="showExplanation(&quot;function_boundary&quot;,&quot;map&quot;)">View Map</button>':''}</div></div><table><thead><tr><th>${cat==='function_boundary'?'Address':'Item'}</th><th>${cat==='function_boundary'?'End / Size':'Result'}</th><th>Detail</th></tr></thead><tbody>`;
                             for(let k in d.results) {
                                 const item = d.results[k]; const top = item.hypotheses[0];
                                 const validators = top.validators || [];
@@ -1149,7 +1145,7 @@ def dashboard():
                                         : (data.known_function || JSON.stringify(data).substring(0,40)+'...'));
                                 resText = String(resText).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
                                 const vList = vCount ? `Vouched by: ${validators.join(', ')}` : 'No validations yet';
-                                tableHtml += `<tr class="bb-row"><td><code>${k}</code></td><td style="color:var(--accent); font-weight:500;">${vCount ? '<span style="color:var(--success); margin-right:0.3rem;" title="'+vList+'">✓</span>' : ''}${resText}</td><td><button class="btn btn-primary btn-action" onclick="showExplanation('${cat}','${k}')">Details</button> <span style="font-size:0.6rem; color:var(--muted)">via ${top.backend}${vCount ? ` <span style="color:var(--success); cursor:help;" title="${vList}">+${vCount} vouches</span>` : ''} (Score: ${top.score})</span></td></tr>`;
+                                tableHtml += `<tr class="bb-row"><td><code>${k}</code></td><td style="color:var(--accent); font-weight:500;">${vCount ? '<span style="color:var(--success); margin-right:0.3rem;" title="'+vList+'">✓</span>' : ''}${resText}</td><td>${cat==='cfg_generation'?'<button class="btn btn-primary btn-action" onclick="showConsensus(&quot;'+cat+'&quot;,&quot;'+k+'&quot;)">Visual Graph</button> ':''}<button class="btn btn-primary btn-action" onclick="showExplanation('${cat}','${k}')">Details</button> <span style="font-size:0.6rem; color:var(--muted)">via ${top.backend}${vCount ? ` <span style="color:var(--success); cursor:help;" title="${vList}">+${vCount} vouches</span>` : ''} (Score: ${top.score})</span></td></tr>`;
                             }
                             tableHtml += '</tbody></table>';
                             if (section.innerHTML !== tableHtml) { section.innerHTML = tableHtml; section.style.animation = 'glow-pulse 0.5s ease-out'; }

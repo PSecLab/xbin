@@ -30,7 +30,10 @@ Traditional binary analysis tools are often isolated silos. **xbin** changes thi
 python3 -m venv venv
 source venv/bin/activate
 
-# Install the xbin package
+# Development Mode (Recommended): Live source edits take effect immediately
+pip install -e .
+
+# Production / Deployment Mode: Standard static installation for production servers or Docker images
 pip install .
 ```
 

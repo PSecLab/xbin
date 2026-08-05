@@ -111,8 +111,8 @@ def test_verifier_stamp_does_not_change_score(clean_redis):
     st = _state(r, SIG, item)
     target_id = st["hypotheses"][0]["id"]
     verifier.submit_verification(target_id=target_id, verdict="PASS", confidence=1.0, evidence="Verified", item_key=item)
-    time.sleep(0.3)
-    updated_state = json.loads(r.get(f"xbin:bb:{SIG}:{item}"))
+    updated_state = _state(r, SIG, item)
+    assert updated_state is not None
     top = updated_state["hypotheses"][0]
     assert len(updated_state.get("verifications", [])) == 1
     assert updated_state["verifications"][0]["verifier_name"] == "cross_checker"
@@ -131,8 +131,8 @@ def test_ranker_override(clean_redis):
 
     ranker = _post("bind_arbiter", SIG, None, None, None, is_ranker=True)
     ranker.update_rank(item_key=item, target_id=ghidriff_id, new_score=2.0)  # arbiter _SCORE_CONSENSUS
-    time.sleep(0.3)
-    st = json.loads(r.get(f"xbin:bb:{SIG}:{item}"))
+    st = _state(r, SIG, item)
+    assert st is not None
     assert st["hypotheses"][0]["backend"] == "ghidriff"   # boosted to the top
     assert st["hypotheses"][0]["score"] == 2.0
     assert st["status"] == "RESOLVED"                     # gap 1.05 > margin

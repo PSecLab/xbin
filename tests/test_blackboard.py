@@ -48,9 +48,8 @@ def test_verifier_stamping(clean_redis):
     
     # 3. Submit verification stamp
     assert verifier.submit_verification(target_id=hyp_id, verdict="PASS", confidence=1.0, evidence="Valid size", item_key=item) is True
-    time.sleep(0.5)
     
-    state = json.loads(clean_redis.get(f'xbin:bb:{cat}:{item}'))
+    state = wait_for_key(clean_redis, f'xbin:bb:{cat}:{item}')
     assert len(state.get('verifications', [])) == 1
     stamp = state['verifications'][0]
     assert stamp['target_id'] == hyp_id
@@ -77,8 +76,16 @@ def test_ranker_update(clean_redis):
     
     # 3. Use Ranker to override the score
     ranker.update_rank(item_key=item, target_id=hyp_id, new_score=99.9)
-    time.sleep(0.5) # Give rank update time to process
     
     # Verify score was updated
-    state = json.loads(clean_redis.get(f'xbin:bb:{cat}:{item}'))
+    start = time.time()
+    state = None
+    while time.time() - start < 3.0:
+        val = clean_redis.get(f'xbin:bb:{cat}:{item}')
+        if val:
+            state = json.loads(val)
+            if state['hypotheses'][0]['score'] == 99.9:
+                break
+        time.sleep(0.05)
+    assert state is not None
     assert state['hypotheses'][0]['score'] == 99.9

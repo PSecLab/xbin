@@ -15,7 +15,11 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PLUGINS = os.path.join(_REPO_ROOT, "plugins")
 
 # Backend names that carry a weight in main.py BACKEND_WEIGHTS (unknown -> 0.5).
-WEIGHTED_BACKENDS = {"fid", "ghidriff", "bind_se", "symbolic_regression", "pysindy", "bind_arbiter"}
+WEIGHTED_BACKENDS = {
+    "fid", "ghidriff", "bind_se", "symbolic_regression", "pysindy", "bind_arbiter",
+    "angr_cfg", "radare_cfg", "angr_boundaries", "radare_boundaries", "binja",
+    "boundary_ranker", "boundary_validator", "flirt_matcher"
+}
 
 # path -> (name, category, is_ranker, is_validator)
 EXPECTED = {
@@ -25,6 +29,14 @@ EXPECTED = {
     "equation_recovery/bind_se/bind_se_worker.py": ("bind_se", "equation_recovery", False, False),
     "equation_recovery/symbolic_regression/sr_worker.py": ("symbolic_regression", "equation_recovery", False, False),
     "equation_recovery/pysindy/pysindy_worker.py": ("pysindy", "equation_recovery", False, False),
+    "cfg_generation/angr/angr_worker.py": ("angr_cfg", "cfg_generation", False, False),
+    "cfg_generation/radare/radare_worker.py": ("radare_cfg", "cfg_generation", False, False),
+    "function_boundary/angr/angr_boundary_worker.py": ("angr_boundaries", "function_boundary", False, False),
+    "function_boundary/radare/radare_boundary_worker.py": ("radare_boundaries", "function_boundary", False, False),
+    "function_boundary/binja/binja_boundary_worker.py": ("binja", "function_boundary", False, False),
+    "function_boundary/boundary_ranker/boundary_ranker.py": ("boundary_ranker", "function_boundary", True, False),
+    "function_boundary/boundary_validator/boundary_validator.py": ("boundary_validator", "function_boundary", False, True),
+    "symbol_matching/flirt/flirt_worker.py": ("flirt_matcher", "symbol_matching", False, False),
 }
 
 
@@ -49,10 +61,10 @@ def test_plugin_metadata(rel_path, expected):
     assert w.display_name, "display_name should be set on the plugin decorator"
 
 
-def test_only_arbiter_is_ranker():
+def test_registered_rankers():
     rankers = []
     for rel_path, (name, *_rest) in EXPECTED.items():
         w = _load_worker(rel_path, f"chk_{name}")
         if w.is_ranker:
             rankers.append(w.name)
-    assert rankers == ["bind_arbiter"], f"unexpected rankers: {rankers}"
+    assert set(rankers) == {"bind_arbiter", "boundary_ranker"}, f"unexpected rankers: {rankers}"

@@ -94,6 +94,14 @@ def test_plugins_available_shape(rest_base, clean_redis):
         ("bind_arbiter", "signature_matching"),
         ("bind_se", "equation_recovery"),
         ("symbolic_regression", "equation_recovery"),
+        ("angr_cfg", "cfg_generation"),
+        ("radare_cfg", "cfg_generation"),
+        ("angr_boundaries", "function_boundary"),
+        ("radare_boundaries", "function_boundary"),
+        ("binja", "function_boundary"),
+        ("boundary_ranker", "function_boundary"),
+        ("boundary_validator", "function_boundary"),
+        ("flirt_matcher", "symbol_matching"),
     }
     assert expected.issubset(set(plugins.keys())), f"missing: {expected - set(plugins.keys())}"
     # bind_arbiter is the ranker for signature_matching; equation_recovery has none.
