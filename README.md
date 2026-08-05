@@ -44,6 +44,41 @@ pip install .
 3. **Deploy the Fleet**: Use the "Plugin Manager" sidebar to start tools like `angr_cfg` or `radare_cfg`.
 4. **Analyze**: Upload a binary, select your goals, and watch the blackboard populate in real-time.
 
+## 🧩 External Plugins
+
+Plugins do not have to live in this repo. Point the orchestrator at a plugin
+checked out anywhere and it discovers it from the `@xbin.plugin` decorator,
+injecting the SDK into the build for you:
+
+```bash
+xbin-orchestrator --plugin ~/xbin_external_example     # one plugin
+xbin-orchestrator --plugin-dir ~/my-plugins            # a tree of them
+```
+
+See [xbin_external_example](https://github.com/PSecLab/xbin_external_example)
+for a minimal standalone plugin repo.
+
+A plugin whose image is too heavy for the orchestrator to build (e.g. one
+extending a licensed Binary Ninja base) can ship a `.xbin-prebuilt` marker and
+its own `build.sh`. The orchestrator then reuses the existing image and skips
+the build entirely.
+
+## 🚥 Running an Analysis (end to end)
+
+> 💡 **No binary handy?** A ready-to-use `sample.elf` is bundled in [`examples/`](examples/).
+
+1. **Start the engine** and open the dashboard:
+   ```bash
+   xbin-orchestrator        # → http://localhost:8000
+   ```
+2. **Load the binary** — *Choose Binary*.
+3. **Select goals** — tick **Boundaries** (`function_boundary`) and
+   **Symbols** (`symbol_matching`).
+4. **Start the plugins** — e.g. `angr_boundaries` and `radare_boundaries`
+   (boundaries) and `flirt_matcher` (symbols), plus any others you want
+   competing. Add `--plugin <path>` at startup to bring in external ones.
+5. **Start Analysis** 🚀 — the fleet reacts and the blackboard fills in.
+
 ## 👩‍💻 How to Add Your Own Tool
 
 The `xbin` SDK makes it trivial to wrap any analysis script into a containerized worker. For a detailed guide and a "Hello World" example, see the **[SDK Reference Guide](docs/sdk_reference.md)**.
