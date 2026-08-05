@@ -4,7 +4,8 @@ package orchestrator;
 service OrchestratorService {
   rpc RegisterWorker(RegisterRequest) returns (RegisterResponse);
   rpc PostResult(PostResultRequest) returns (PostResultResponse);
-  rpc UpdateRank(UpdateRankRequest) returns (UpdateRankResponse); // NEW: External rankers call this
+  rpc SubmitVerification(SubmitVerificationRequest) returns (SubmitVerificationResponse);
+  rpc UpdateRank(UpdateRankRequest) returns (UpdateRankResponse);
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
 }
 
@@ -13,9 +14,9 @@ message RegisterRequest {
   string backend_name = 2;
   string analysis_type = 3;
   bool is_validator = 4;
-  bool is_ranker = 5; // NEW: Distinguish ranker plugins
-  string display_name = 6; // Human-friendly label for the dashboard (falls back to backend_name)
-  string description = 7;  // Short blurb describing what the analysis does
+  bool is_ranker = 5;
+  string display_name = 6;
+  string description = 7;
 }
 
 message RegisterResponse {
@@ -37,12 +38,27 @@ message PostResultRequest {
   string result_data = 3;
   float confidence = 4;
   string backend_name = 5;
-  string validation_target_id = 6; 
 }
 
 message PostResultResponse {
   bool accepted = 1;
   string current_status = 2;
+}
+
+message SubmitVerificationRequest {
+  string analysis_type = 1;
+  string item_key = 2;
+  string target_id = 3;
+  string verdict = 4; // "PASS", "FAIL", "ABSTAIN"
+  optional float confidence = 5;
+  string evidence = 6;
+  string backend_name = 7;
+  string verifier_version = 8;
+}
+
+message SubmitVerificationResponse {
+  bool accepted = 1;
+  string error_message = 2;
 }
 
 message UpdateRankRequest {
@@ -56,3 +72,4 @@ message UpdateRankRequest {
 message UpdateRankResponse {
   bool accepted = 1;
 }
+

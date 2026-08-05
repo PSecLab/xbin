@@ -95,8 +95,8 @@ Key conventions:
 `xbin.start_worker()`:
 
 - **Analyzer/Producer**: implements `on_new_binary(binary_path, requested_goals)` → `xbin.post_result(item_key, data, confidence)`.
-- **Validator** (`is_validator=True`): implements `on_update(category, item_key, new_hypothesis, top_hypothesis)` → `xbin.post_validation(item_key, target_id="TOP")` to vouch.
-- **Ranker** (`is_ranker=True`): implements `on_update(...)` → `xbin.update_rank(item_key, target_id, new_score)` to absolutely override a hypothesis score. `bind_arbiter` is the concrete ranker (ollama-backed).
+- **Verifier** (`is_validator=True`): implements `on_update(category, item_key, new_hypothesis, top_hypothesis)` → `xbin.submit_verification(target_id, verdict, confidence=..., evidence=...)` to attach an immutable verification stamp (`PASS`, `FAIL`, `ABSTAIN`). Verifiers never modify hypothesis scores.
+- **Ranker** (`is_ranker=True`): implements `on_update(...)` → `xbin.update_rank(item_key, target_id, new_score)` to absolutely override a hypothesis score. Rankers are the only components allowed to calculate scores or ordering. `bind_arbiter` is the concrete ranker (ollama-backed).
 
 The decorator also takes `display_name=` and `description=` (shown on the
 dashboard cards; discovered statically via regex before the plugin starts).
@@ -105,13 +105,13 @@ dashboard cards; discovered statically via regex before the plugin starts).
 own (e.g. `bind_se` posts semantics to `equation_recovery` and identity matches
 to `signature_matching`).
 
-**Consensus math** lives entirely in
-`XbinOrchestratorServicer.PostResult` / `UpdateRank` in `main.py`:
+**Consensus math & Verification Stamps** live in
+`XbinOrchestratorServicer.PostResult` / `SubmitVerification` / `UpdateRank` in `main.py`:
 
-- A hypothesis `id` is `sha256(sorted-json of data)[:12]` → identical data from different backends deduplicates and auto-vouches.
-- `score = confidence * BACKEND_WEIGHTS.get(backend_name, 0.5)`; a vouch adds `confidence * weight` to the target's score. `BACKEND_WEIGHTS` is keyed by `backend_name` (the decorator `name=`): `fid` 1.0, `ghidriff` 0.95, `symbolic_regression` 0.90 (highest-priority recoverer), `bind_se`/`pysindy` 0.85, `bind_arbiter` 1.0; unknown backends fall back to `0.5`.
+- A hypothesis `id` is `sha256(sorted-json of data)[:12]` → identical data from different backends deduplicates producers. Initial hypothesis `score = confidence * BACKEND_WEIGHTS.get(backend_name, 0.5)`. `BACKEND_WEIGHTS` is keyed by `backend_name` (the decorator `name=`): `fid` 1.0, `ghidriff` 0.95, `symbolic_regression` 0.90 (highest-priority recoverer), `bind_se`/`pysindy` 0.85, `bind_arbiter` 1.0; unknown backends fall back to `0.5`.
+- **Verifiers**: Submit immutable stamps containing `target_id`, `verifier_name`, `verifier_version`, `verdict` (`PASS`/`FAIL`/`ABSTAIN`), optional `confidence`, `evidence`, and `timestamp`. Stamps are stored under `verifications` separately from `hypotheses` and never mutate hypothesis scores or ordering. Verification targets must be explicit immutable IDs (`"TOP"` alias is rejected).
 - Status is `CONFLICTED` when the top two hypotheses differ in data and their score gap is `<= MARGIN_THRESHOLD` (0.05); otherwise `RESOLVED`.
-- Rankers bypass additive scoring: `update_rank` sets `score` outright, then re-sorts.
+- **Rankers**: Are the only components allowed to modify hypothesis scores or ordering via `update_rank`.
 
 ## Plugin system & Docker (the non-obvious part)
 

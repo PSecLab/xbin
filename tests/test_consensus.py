@@ -76,44 +76,48 @@ def test_resolved_outside_margin(clean_redis):
     assert st["status"] == "RESOLVED"
 
 
-def test_dedup_becomes_vouch(clean_redis):
+def test_producer_dedup(clean_redis):
     r = clean_redis
     item = "0x00004000"
     data = {"known_function": "crc32"}
     _post("fid", SIG, None, None, None).post_result(item, data, 1.0)       # score 1.0
-    _post("ghidriff", SIG, None, None, None).post_result(item, dict(data), 1.0)  # identical -> vouch
+    _post("ghidriff", SIG, None, None, None).post_result(item, dict(data), 1.0)  # identical -> deduplicated
     st = _state(r, SIG, item)
-    assert len(st["hypotheses"]) == 1                                   # deduped, not a new hyp
+    assert len(st["hypotheses"]) == 1                                   # deduped
     top = st["hypotheses"][0]
     assert top["backend"] == "fid"                                      # original author kept
-    assert "ghidriff" in top.get("validators", [])
-    assert top["score"] == round(1.0 + 1.0 * 0.95, 3)                   # 1.0 + ghidriff's 0.95 = 1.95
+    assert "ghidriff" in top.get("producers", [])
+    assert top["score"] == 1.0                                          # score unchanged by deduplication
 
 
-def test_self_vouch_rejected(clean_redis):
+def test_self_dedup_ignored(clean_redis):
     r = clean_redis
     item = "0x00005000"
     data = {"known_function": "crc32"}
     w = _post("fid", SIG, None, None, None)
     w.post_result(item, data, 1.0)
-    w.post_result(item, dict(data), 1.0)   # same backend, identical data -> no self-vouch
+    w.post_result(item, dict(data), 1.0)   # same backend, identical data
     st = _state(r, SIG, item)
     assert len(st["hypotheses"]) == 1
-    assert st["hypotheses"][0].get("validators", []) == []
+    assert st["hypotheses"][0].get("producers", []) == ["fid"]
     assert st["hypotheses"][0]["score"] == 1.0
 
 
-def test_validator_vouch_top(clean_redis):
+def test_verifier_stamp_does_not_change_score(clean_redis):
     r = clean_redis
     item = "0x00006000"
     _post("fid", SIG, None, None, None).post_result(item, {"known_function": "foo"}, 1.0)  # 1.0
-    validator = _post("cross_checker", SIG, None, None, None, is_validator=True)            # unknown weight 0.5
-    _state(r, SIG, item)
-    validator.post_validation(item_key=item, target_id="TOP", confidence=1.0)
+    verifier = _post("cross_checker", SIG, None, None, None, is_validator=True)
+    st = _state(r, SIG, item)
+    target_id = st["hypotheses"][0]["id"]
+    verifier.submit_verification(target_id=target_id, verdict="PASS", confidence=1.0, evidence="Verified", item_key=item)
     time.sleep(0.3)
-    top = json.loads(r.get(f"xbin:bb:{SIG}:{item}"))["hypotheses"][0]
-    assert "cross_checker" in top.get("validators", [])
-    assert top["score"] == round(1.0 + 1.0 * 0.5, 3)   # 1.5
+    updated_state = json.loads(r.get(f"xbin:bb:{SIG}:{item}"))
+    top = updated_state["hypotheses"][0]
+    assert len(updated_state.get("verifications", [])) == 1
+    assert updated_state["verifications"][0]["verifier_name"] == "cross_checker"
+    assert updated_state["verifications"][0]["verdict"] == "PASS"
+    assert top["score"] == 1.0   # score remains unchanged
 
 
 def test_ranker_override(clean_redis):

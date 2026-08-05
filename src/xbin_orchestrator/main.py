@@ -9,6 +9,7 @@ import shutil
 import hashlib
 import sys
 import tempfile
+import uuid
 import webbrowser
 import socket
 import argparse
@@ -655,6 +656,24 @@ def get_analysis_results(analysis_type: str):
         results[k.split(":")[-1]] = item
     return {"results": results}
 
+@app.get("/api/v1/blackboard/{analysis_type}")
+def get_blackboard_category(analysis_type: str):
+    cat = analysis_type.strip()
+    keys = r.keys(f"xbin:bb:{cat}:*")
+    results = {}
+    for k in keys:
+        results[k.split(":")[-1]] = json.loads(r.get(k))
+    return {"results": results}
+
+@app.get("/api/v1/blackboard/{analysis_type}/{item_key}")
+def get_blackboard_item(analysis_type: str, item_key: str):
+    cat = analysis_type.strip()
+    state_str = r.get(f"xbin:bb:{cat}:{item_key}")
+    if not state_str:
+        raise HTTPException(status_code=404, detail="Not Found")
+    return json.loads(state_str)
+
+
 @app.get("/api/v1/blackboard/{analysis_type}/{item_key}/summary")
 def get_result_summary(analysis_type: str, item_key: str):
     """Pipe the top hypothesis through ollama for a concise result:
@@ -1196,62 +1215,38 @@ class XbinOrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServiceServicer
         timestamp = time.strftime("%H:%M:%S")
         audit_key = f"xbin:bb_logs:{cat}"
         
-        state = json.loads(r.get(bb_key)) if r.exists(bb_key) else {"status": "PENDING", "hypotheses": []}
+        state = json.loads(r.get(bb_key)) if r.exists(bb_key) else {"status": "PENDING", "hypotheses": [], "verifications": []}
+        if "verifications" not in state:
+            state["verifications"] = []
         
-        # 1. Handle Validation (Vouching)
-        if request.validation_target_id:
-            target_hyp = None
-            if request.validation_target_id == "TOP":
-                if state["hypotheses"]: target_hyp = state["hypotheses"][0]
-            else:
-                for hyp in state["hypotheses"]:
-                    if hyp.get("id") == request.validation_target_id:
-                        target_hyp = hyp
-                        break
-            
-            if target_hyp:
-                if request.backend_name not in target_hyp.setdefault("validators", []) and request.backend_name != target_hyp["backend"]:
-                    target_hyp["validators"].append(request.backend_name)
-                    target_hyp["score"] = round(target_hyp["score"] + (request.confidence * weight), 3)
-                    log_entry = f"[{timestamp}] {request.backend_name} VOUCHED for {request.item_key} (ID: {target_hyp.get('id')})"
-                    r.lpush(audit_key, log_entry); r.ltrim(audit_key, 0, 4999)
-                    sys_log(f"Validation: {request.backend_name} -> {cat}/{request.item_key} (score {target_hyp['score']})")
-                new_hyp = target_hyp # For the event broadcast
-            else:
-                return orchestrator_pb2.PostResultResponse(accepted=False, current_status="TARGET_NOT_FOUND")
+        data = json.loads(request.result_data)
+        hyp_id = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
         
-        # 2. Handle New Data Submission
+        # Deduplication: Check if this data already exists as a hypothesis
+        existing = next((h for h in state["hypotheses"] if h.get("id") == hyp_id), None)
+        if existing:
+            producers = existing.setdefault("producers", [])
+            if request.backend_name not in producers:
+                producers.append(request.backend_name)
+            new_hyp = existing
         else:
-            data = json.loads(request.result_data)
-            hyp_id = hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()[:12]
-            
-            # Deduplication: Check if this data already exists as a hypothesis
-            existing = next((h for h in state["hypotheses"] if h.get("id") == hyp_id), None)
-            if existing:
-                if request.backend_name not in existing.setdefault("validators", []) and request.backend_name != existing["backend"]:
-                    existing["validators"].append(request.backend_name)
-                    existing["score"] = round(existing["score"] + (request.confidence * weight), 3)
-                new_hyp = existing
-            else:
-                new_hyp = {
-                    "id": hyp_id,
-                    "data": data, 
-                    "score": round(request.confidence * weight, 3), 
-                    "raw_conf": round(request.confidence, 3),
-                    "backend": request.backend_name,
-                    "validators": []
-                }
-                state["hypotheses"].append(new_hyp)
-                log_entry = f"[{timestamp}] {request.backend_name} -> {request.item_key} (New Hypothesis)"
-                r.lpush(audit_key, log_entry); r.ltrim(audit_key, 0, 4999)
-                # Verbose per-function progress into the System Logs stream so the
-                # live viewer shows results landing one function at a time.
-                _d = data if isinstance(data, dict) else {}
-                _summary = (_d.get("known_function") or _d.get("recovered_expression")
-                            or (_d.get("explanation", "")[:60]) or "result")
-                sys_log(f"Result: {request.backend_name} -> {cat}/{request.item_key} = {_summary} (conf {round(request.confidence, 3)})")
+            new_hyp = {
+                "id": hyp_id,
+                "data": data, 
+                "score": round(request.confidence * weight, 3), 
+                "raw_conf": round(request.confidence, 3),
+                "backend": request.backend_name,
+                "producers": [request.backend_name]
+            }
+            state["hypotheses"].append(new_hyp)
+            log_entry = f"[{timestamp}] {request.backend_name} -> {request.item_key} (New Hypothesis)"
+            r.lpush(audit_key, log_entry); r.ltrim(audit_key, 0, 4999)
+            _d = data if isinstance(data, dict) else {}
+            _summary = (_d.get("known_function") or _d.get("recovered_expression")
+                        or (_d.get("explanation", "")[:60]) or "result")
+            sys_log(f"Result: {request.backend_name} -> {cat}/{request.item_key} = {_summary} (conf {round(request.confidence, 3)})")
 
-        # Re-sort and determine status
+        # Re-sort hypotheses by score (rankers / initial scores set the ordering)
         state["hypotheses"] = sorted(state["hypotheses"], key=lambda x: x["score"], reverse=True)
         status = "RESOLVED"
         if len(state["hypotheses"]) > 1:
@@ -1270,6 +1265,76 @@ class XbinOrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServiceServicer
             "status": status
         }))
         return orchestrator_pb2.PostResultResponse(accepted=True, current_status=status)
+
+    def SubmitVerification(self, request, context):
+        cat = request.analysis_type.strip()
+        bb_key = f"xbin:bb:{cat}:{request.item_key}"
+        timestamp_str = time.strftime("%H:%M:%S")
+        audit_key = f"xbin:bb_logs:{cat}"
+        
+        target_id = (request.target_id or "").strip()
+        if not target_id or target_id.upper() == "TOP":
+            return orchestrator_pb2.SubmitVerificationResponse(
+                accepted=False,
+                error_message="Explicit target_id required; aliases like 'TOP' are not permitted."
+            )
+            
+        verdict = (request.verdict or "").strip().upper()
+        if verdict not in ["PASS", "FAIL", "ABSTAIN"]:
+            return orchestrator_pb2.SubmitVerificationResponse(
+                accepted=False,
+                error_message=f"Invalid verdict '{request.verdict}'. Must be PASS, FAIL, or ABSTAIN."
+            )
+            
+        if not r.exists(bb_key):
+            return orchestrator_pb2.SubmitVerificationResponse(
+                accepted=False,
+                error_message=f"Item '{request.item_key}' not found on blackboard."
+            )
+            
+        state = json.loads(r.get(bb_key))
+        target_hyp = next((h for h in state.get("hypotheses", []) if h.get("id") == target_id), None)
+        if not target_hyp:
+            return orchestrator_pb2.SubmitVerificationResponse(
+                accepted=False,
+                error_message=f"Target hypothesis ID '{target_id}' not found."
+            )
+            
+        conf_val = round(float(request.confidence), 3) if request.HasField("confidence") else None
+        stamp_id = f"stamp_{uuid.uuid4().hex[:12]}"
+        iso_timestamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        stamp = {
+            "stamp_id": stamp_id,
+            "target_id": target_id,
+            "verifier_name": request.backend_name,
+            "verifier_version": request.verifier_version or "1.0",
+            "verdict": verdict,
+            "confidence": conf_val,
+            "evidence": request.evidence if request.evidence else None,
+            "timestamp": iso_timestamp
+        }
+        
+        verifications = state.setdefault("verifications", [])
+        verifications.append(stamp)
+        
+        # Save state without mutating hypothesis scores or re-ordering hypotheses
+        r.set(bb_key, json.dumps(state))
+        
+        log_entry = f"[{timestamp_str}] {request.backend_name} STAMPED {request.item_key} ({target_id}: {verdict})"
+        r.lpush(audit_key, log_entry); r.ltrim(audit_key, 0, 4999)
+        sys_log(f"Verification Stamp: {request.backend_name} v{request.verifier_version or '1.0'} -> {cat}/{request.item_key} target {target_id} = {verdict}")
+        
+        r.publish("xbin:events", json.dumps({
+            "type": "BLACKBOARD_UPDATE", 
+            "analysis_type": cat, 
+            "item_key": request.item_key, 
+            "verification_stamp": stamp, 
+            "top_hypothesis": state["hypotheses"][0] if state.get("hypotheses") else None, 
+            "status": state.get("status", "RESOLVED"),
+            "is_verification": True
+        }))
+        
+        return orchestrator_pb2.SubmitVerificationResponse(accepted=True, error_message="")
 
     def UpdateRank(self, request, context):
         cat = request.analysis_type.strip()

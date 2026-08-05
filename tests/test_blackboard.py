@@ -28,7 +28,7 @@ def test_analyzer_submission(clean_redis):
     assert state['hypotheses'][0]['data']['size'] == 42
     assert state['hypotheses'][0]['score'] == 0.5  # 1.0 conf * 0.5 default weight
 
-def test_validator_vouching(clean_redis):
+def test_verifier_stamping(clean_redis):
     cat = 'signature_matching'
     item = '0x1001'
     
@@ -37,21 +37,27 @@ def test_validator_vouching(clean_redis):
     analyzer.register()
     analyzer.post_result(item_key=item, data={'size': 42}, confidence=1.0)
     
-    # 2. Setup Validator
-    validator = Worker(name='test_validator', category=cat, version='1.0', is_validator=True)
-    assert validator.register() is True
+    # 2. Setup Verifier
+    verifier = Worker(name='test_verifier', category=cat, version='1.0', is_validator=True)
+    assert verifier.register() is True
     
     # Wait for initial result
-    wait_for_key(clean_redis, f'xbin:bb:{cat}:{item}')
+    state = wait_for_key(clean_redis, f'xbin:bb:{cat}:{item}')
+    hyp_id = state['hypotheses'][0]['id']
+    initial_score = state['hypotheses'][0]['score']
     
-    # 3. Vouch
-    validator.post_validation(item_key=item, target_id="TOP", confidence=1.0)
-    time.sleep(0.5) # Give vouch time to process
+    # 3. Submit verification stamp
+    assert verifier.submit_verification(target_id=hyp_id, verdict="PASS", confidence=1.0, evidence="Valid size", item_key=item) is True
+    time.sleep(0.5)
     
     state = json.loads(clean_redis.get(f'xbin:bb:{cat}:{item}'))
-    assert len(state['hypotheses'][0].get('validators', [])) == 1
-    assert 'test_validator' in state['hypotheses'][0]['validators']
-    assert state['hypotheses'][0]['score'] == 1.0 # 0.5 initial + 0.5 boost from validator
+    assert len(state.get('verifications', [])) == 1
+    stamp = state['verifications'][0]
+    assert stamp['target_id'] == hyp_id
+    assert stamp['verifier_name'] == 'test_verifier'
+    assert stamp['verdict'] == 'PASS'
+    # Hypothesis score must remain unchanged
+    assert state['hypotheses'][0]['score'] == initial_score
 
 def test_ranker_update(clean_redis):
     cat = 'signature_matching'

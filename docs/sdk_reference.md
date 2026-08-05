@@ -77,24 +77,30 @@ if __name__ == "__main__":
 ```
 
 ### The Validator (Verifier)
-This tool listens for the `hello_finder`'s output and vouches for it if it meets certain criteria.
+### The Verifier
+This tool listens for `hello_finder`'s output and attaches an immutable verification stamp.
 
 ```python
 import xbin
 
-@xbin.plugin(name="hello_validator", category="symbol_matching", is_validator=True)
-class HelloValidator:
+@xbin.plugin(name="hello_verifier", category="symbol_matching", is_validator=True)
+class HelloVerifier:
     def on_update(self, category, item_key, new_hypothesis, top_hypothesis):
-        # If the new finding is our target string, vouch for it!
-        if category == "symbol_matching" and new_hypothesis['data'] == "main_entry_greeting":
-            xbin.post_validation(item_key=item_key, target_id="TOP")
+        # If the new finding is our target string, attach a PASS stamp!
+        if category == "symbol_matching" and new_hypothesis and new_hypothesis['data'] == "main_entry_greeting":
+            xbin.submit_verification(
+                target_id=new_hypothesis['id'],
+                verdict="PASS",
+                confidence=0.95,
+                evidence="String match verified in target binary"
+            )
 
 if __name__ == "__main__":
     xbin.start_worker()
 ```
 
 ### The Ranker (Judge)
-Rankers listen to both analysis and validation events and apply global ranking heuristics.
+Rankers listen to hypotheses and verification stamps and apply global ranking heuristics. Only rankers can modify scores or ordering.
 
 ```python
 import xbin
@@ -106,9 +112,14 @@ class HelloRanker:
         if category != "symbol_matching":
             return
 
-        # Heuristic: If we have any validators, boost the score to a high fixed value
-        v_count = len(top_hypothesis.get('validators', []))
-        if v_count >= 1:
+        # Fetch blackboard state to inspect verifications
+        state = xbin.get_analysis(category, item_key)
+        if not state:
+            return
+
+        verifications = state.get("verifications", [])
+        # Heuristic: If we have a PASS verification, boost the hypothesis score
+        if any(v["verdict"] == "PASS" for v in verifications if v["target_id"] == top_hypothesis['id']):
             xbin.update_rank(item_key, top_hypothesis['id'], 2.0)
 
 if __name__ == "__main__":
@@ -132,19 +143,22 @@ Registers your class with the orchestrator.
 Called when a new binary is uploaded. `binary_path` is the path inside the container.
 
 #### `on_update(self, category, item_key, new_hypothesis, top_hypothesis)`
-Called every time the blackboard changes. Use this to build collaborative tools, Validators, or Rankers.
+Called every time the blackboard changes. Use this to build collaborative tools, Verifiers, or Rankers.
 
 ### Methods (via `xbin` module)
 
 #### `xbin.post_result(item_key, data, confidence)`
-Submit a new finding. If the data is unique, it creates a new hypothesis. If it matches an existing one, it acts as a vouch.
+Submit a new producer hypothesis.
 - `item_key`: Unique subject identifier.
 - `data`: Any JSON-serializable object.
 - `confidence`: Your certainty (0.0 to 1.0).
 
-#### `xbin.post_validation(item_key, target_id="TOP", confidence=1.0)`
-Specifically for validators. Boosts the score of an existing hypothesis.
-- `target_id`: The ID of the hypothesis to vouch for, or `"TOP"` for the leader.
+#### `xbin.submit_verification(target_id, verdict, confidence=None, evidence=None)`
+Specifically for Verifiers. Attaches an immutable verification stamp to an explicit hypothesis target ID without modifying hypothesis scores.
+- `target_id`: Explicit immutable ID of the hypothesis being verified (alias `"TOP"` is rejected).
+- `verdict`: `"PASS"`, `"FAIL"`, or `"ABSTAIN"`.
+- `confidence`: Optional float confidence level (0.0 to 1.0).
+- `evidence`: Optional explanation or evidence string.
 
 #### `xbin.update_rank(item_key, target_id, new_score)`
 Specifically for Rankers. Updates the absolute consensus score of a hypothesis.

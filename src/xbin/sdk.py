@@ -123,17 +123,39 @@ class Worker:
         except Exception as e:
             print(f"[ERROR] Post failed for {item_key}: {e}")
 
-    def post_validation(self, item_key: str, target_id: str = "TOP", confidence: float = 1.0):
-        """Vouch for an existing hypothesis instead of posting new data."""
+    def submit_verification(self, target_id: str, verdict: str, confidence: Optional[float] = None,
+                            evidence: Optional[str] = None, item_key: Optional[str] = None,
+                            category: Optional[str] = None):
+        """Attach an immutable verification stamp to a target hypothesis."""
+        target_cat = category or self.category
+        target_item = item_key or getattr(self, "_current_item_key", None)
+        if not target_item:
+            print("[ERROR] Verification requires item_key (explicit or from event context).")
+            return False
+
+        req_kwargs = {
+            "analysis_type": target_cat,
+            "item_key": target_item,
+            "target_id": target_id,
+            "verdict": verdict,
+            "evidence": evidence or "",
+            "backend_name": self.name,
+            "verifier_version": self.version,
+        }
+        if confidence is not None:
+            req_kwargs["confidence"] = float(confidence)
+
         try:
-            self._stub.PostResult(orchestrator_pb2.PostResultRequest(
-                analysis_type=self.category, item_key=item_key,
-                result_data="", confidence=confidence, backend_name=self.name,
-                validation_target_id=target_id
-            ))
-            print(f"[V] Validation posted for {item_key} -> {target_id} (Conf: {confidence})")
+            resp = self._stub.SubmitVerification(orchestrator_pb2.SubmitVerificationRequest(**req_kwargs))
+            if resp.accepted:
+                print(f"[V] Verification ({verdict}) posted for {target_item} -> {target_id}")
+                return True
+            else:
+                print(f"[ERROR] Verification rejected for {target_item}: {resp.error_message}")
+                return False
         except Exception as e:
-            print(f"[ERROR] Validation failed for {item_key}: {e}")
+            print(f"[ERROR] Verification failed for {target_item}: {e}")
+            return False
 
     def update_rank(self, item_key: str, target_id: str, new_score: float):
         """Specifically for Rankers: Update the score of a hypothesis."""
@@ -176,12 +198,16 @@ class Worker:
                         self.on_binary_handler(event["path"], event.get("requested_analyses", []))
                         
                     elif event["type"] == "BLACKBOARD_UPDATE" and self.on_update_handler:
-                        self.on_update_handler(
-                            event["analysis_type"], 
-                            event["item_key"], 
-                            event["new_hypothesis"], 
-                            event["top_hypothesis"]
-                        )
+                        self._current_item_key = event["item_key"]
+                        try:
+                            self.on_update_handler(
+                                event["analysis_type"], 
+                                event["item_key"], 
+                                event.get("new_hypothesis"), 
+                                event.get("top_hypothesis")
+                            )
+                        finally:
+                            self._current_item_key = None
         except Exception as e:
             print(f"[CRITICAL] Event loop crash: {e}")
             traceback.print_exc()
@@ -220,11 +246,14 @@ def post_result(item_key: str, data: Any, confidence: float, category: Optional[
     else:
         print("[ERROR] No active worker. Call @xbin.plugin first.")
 
-def post_validation(item_key: str, target_id: str = "TOP", confidence: float = 1.0):
+def submit_verification(target_id: str, verdict: str, confidence: Optional[float] = None,
+                        evidence: Optional[str] = None, item_key: Optional[str] = None,
+                        category: Optional[str] = None):
     if _current_worker:
-        _current_worker.post_validation(item_key, target_id, confidence)
+        return _current_worker.submit_verification(target_id, verdict, confidence, evidence, item_key, category)
     else:
         print("[ERROR] No active worker. Call @xbin.plugin first.")
+        return False
 
 def update_rank(item_key: str, target_id: str, new_score: float):
     if _current_worker:

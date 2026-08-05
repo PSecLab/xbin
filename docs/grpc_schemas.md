@@ -27,21 +27,36 @@ A persistent signal sent by workers every 5 seconds to maintain their "READY" st
     - `acknowledged` (bool): Acknowledgment from the orchestrator.
 
 ### 3. `PostResult`
-The primary method for contributing analysis or validations to the blackboard. This method triggers a global broadcast to all other tools.
+The primary method for contributing producer hypotheses to the blackboard. This method triggers a global broadcast to all other tools.
 
 - **Request (`PostResultRequest`)**:
     - `analysis_type` (string): The category (blackboard) for this result (e.g., `symbol_matching`).
     - `item_key` (string): The unique identifier for the item being analyzed (e.g., a function address `0x401000` or a filename `ls.bin`).
-    - `result_data` (string): A **JSON-encoded string** containing the actual analysis payload. **Empty if performing a validation.**
+    - `result_data` (string): A **JSON-encoded string** containing the actual analysis payload.
     - `confidence` (float): The tool's certainty (0.0 to 1.0).
     - `backend_name` (string): The tool's identity.
-    - `validation_target_id` (string): **Optional.** If set to a hypothesis ID (or `"TOP"`), the orchestrator boosts the score of that hypothesis instead of creating a new one.
 - **Response (`PostResultResponse`)**:
     - `accepted` (bool): True if the hypothesis was recorded.
     - `current_status` (string): The new resolution status of the item (e.g., `RESOLVED`, `CONFLICTED`).
 
-### 4. `UpdateRank`
-Used exclusively by **Ranker plugins** to dynamically override the consensus score of an existing hypothesis based on custom heuristics.
+### 4. `SubmitVerification`
+Used exclusively by **Verifier plugins** to attach immutable verification stamps to existing producer hypotheses. Verifiers NEVER modify hypothesis scores or rankings.
+
+- **Request (`SubmitVerificationRequest`)**:
+    - `analysis_type` (string): The blackboard category.
+    - `item_key` (string): The unique identifier for the item.
+    - `target_id` (string): Explicit immutable target hypothesis ID (alias `"TOP"` is rejected).
+    - `verdict` (string): `"PASS"`, `"FAIL"`, or `"ABSTAIN"`.
+    - `confidence` (optional float): Confidence of the verification verdict.
+    - `evidence` (string): Explanation or evidence text.
+    - `backend_name` (string): The identity of the Verifier plugin.
+    - `verifier_version` (string): Version string of the Verifier plugin.
+- **Response (`SubmitVerificationResponse`)**:
+    - `accepted` (bool): True if the stamp was recorded.
+    - `error_message` (string): Reason for rejection if accepted is False.
+
+### 5. `UpdateRank`
+Used exclusively by **Ranker plugins** to dynamically override the consensus score of an existing hypothesis based on custom heuristics. Rankers are the ONLY components allowed to calculate or modify scores and ordering.
 
 - **Request (`UpdateRankRequest`)**:
     - `analysis_type` (string): The blackboard category.

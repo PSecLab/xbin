@@ -5,7 +5,7 @@ import warnings
 
 import orchestrator_pb2 as orchestrator__pb2
 
-GRPC_GENERATED_VERSION = '1.81.1'
+GRPC_GENERATED_VERSION = '1.81.0'
 GRPC_VERSION = grpc.__version__
 _version_not_supported = False
 
@@ -44,6 +44,11 @@ class OrchestratorServiceStub:
                 request_serializer=orchestrator__pb2.PostResultRequest.SerializeToString,
                 response_deserializer=orchestrator__pb2.PostResultResponse.FromString,
                 _registered_method=True)
+        self.SubmitVerification = channel.unary_unary(
+                '/orchestrator.OrchestratorService/SubmitVerification',
+                request_serializer=orchestrator__pb2.SubmitVerificationRequest.SerializeToString,
+                response_deserializer=orchestrator__pb2.SubmitVerificationResponse.FromString,
+                _registered_method=True)
         self.UpdateRank = channel.unary_unary(
                 '/orchestrator.OrchestratorService/UpdateRank',
                 request_serializer=orchestrator__pb2.UpdateRankRequest.SerializeToString,
@@ -71,9 +76,14 @@ class OrchestratorServiceServicer:
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
 
+    def SubmitVerification(self, request, context):
+        """Missing associated documentation comment in .proto file."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details('Method not implemented!')
+        raise NotImplementedError('Method not implemented!')
+
     def UpdateRank(self, request, context):
-        """NEW: External rankers call this
-        """
+        """Missing associated documentation comment in .proto file."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details('Method not implemented!')
         raise NotImplementedError('Method not implemented!')
@@ -96,6 +106,11 @@ def add_OrchestratorServiceServicer_to_server(servicer, server):
                     servicer.PostResult,
                     request_deserializer=orchestrator__pb2.PostResultRequest.FromString,
                     response_serializer=orchestrator__pb2.PostResultResponse.SerializeToString,
+            ),
+            'SubmitVerification': grpc.unary_unary_rpc_method_handler(
+                    servicer.SubmitVerification,
+                    request_deserializer=orchestrator__pb2.SubmitVerificationRequest.FromString,
+                    response_serializer=orchestrator__pb2.SubmitVerificationResponse.SerializeToString,
             ),
             'UpdateRank': grpc.unary_unary_rpc_method_handler(
                     servicer.UpdateRank,
@@ -162,6 +177,33 @@ class OrchestratorService:
             '/orchestrator.OrchestratorService/PostResult',
             orchestrator__pb2.PostResultRequest.SerializeToString,
             orchestrator__pb2.PostResultResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True)
+
+    @staticmethod
+    def SubmitVerification(request,
+            target,
+            options=(),
+            channel_credentials=None,
+            call_credentials=None,
+            insecure=False,
+            compression=None,
+            wait_for_ready=None,
+            timeout=None,
+            metadata=None):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            '/orchestrator.OrchestratorService/SubmitVerification',
+            orchestrator__pb2.SubmitVerificationRequest.SerializeToString,
+            orchestrator__pb2.SubmitVerificationResponse.FromString,
             options,
             channel_credentials,
             insecure,
