@@ -37,15 +37,26 @@ pip install -e .
 pip install .
 ```
 
-## 🚥 Quick Start
+## 🐍 Python Client Library (`libxbin`)
 
-1. **Start the Engine**:
-   ```bash
-   xbin-orchestrator
-   ```
-2. **Access the Dashboard**: Open `http://localhost:8000` in your browser.
-3. **Deploy the Fleet**: Use the "Plugin Manager" sidebar to start tools like `angr_cfg` or `radare_cfg`.
-4. **Analyze**: Upload a binary, select your goals, and watch the blackboard populate in real-time.
+`xbin` provides a Python frontend library (`libxbin`) for programmatically controlling the orchestrator and reading blackboard results in custom Python scripts:
+
+```python
+import libxbin
+
+# Connect to running orchestrator
+client = libxbin.connect("http://localhost:8000")
+
+# Dispatch binary analysis job
+job = client.analyze("firmware.elf", goals=["cfg_generation", "function_boundary"])
+results = job.wait_for_results(timeout=60)
+
+# Retrieve consensus CFG graph & function boundaries programmatically
+boundaries = client.get_function_boundaries()
+cfg = client.get_cfg("0x400000")
+```
+
+For complete documentation, see the **[libxbin Guide](docs/libxbin_guide.md)** and runnable demo in **[`examples/libxbin_demo.py`](examples/libxbin_demo.py)**.
 
 ## 🧩 External Plugins
 
@@ -165,6 +176,10 @@ message PostResultRequest {
 To enable competition and consensus, tools in the same category should follow a shared JSON schema for `result_data`. 
 - **`cfg_generation`**: Should return a graph with `nodes` and `edges` lists.
 - **`symbol_matching`**: Should return a string or object representing the symbol name.
+
+> [!IMPORTANT]
+> **Schema & Binding Synchronization**:
+> Whenever you modify or extend the gRPC protocol (`orchestrator.proto`), REST endpoints, or category JSON payload schemas (`result_data`), you **MUST** update the corresponding Python client bindings and datatypes in `libxbin` ([`src/libxbin/models.py`](src/libxbin/models.py) and [`src/libxbin/client.py`](src/libxbin/client.py)) to keep external script bindings synchronized with the orchestrator.
 
 ---
 📣 **Feedback Welcome!**

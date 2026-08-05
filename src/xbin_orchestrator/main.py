@@ -221,7 +221,7 @@ def get_references(target: str = ""):
     return {"references": sorted(refs.keys()), "suggested": suggest_reference(target, refs)}
 
 @app.post("/api/v1/upload")
-async def upload_binary(file: UploadFile = File(...), reference: UploadFile = File(None),
+async def upload_binary(background_tasks: BackgroundTasks, file: UploadFile = File(...), reference: UploadFile = File(None),
                         reference_name: str = Form(""), requested_analyses: str = Form("")):
     file_path = os.path.join(UPLOAD_DIR, file.filename)
     with open(file_path, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
@@ -244,6 +244,16 @@ async def upload_binary(file: UploadFile = File(...), reference: UploadFile = Fi
             sys_log(f"Upload: reference '{reference_name}' not found in library; using baked default")
     analyses = [a.strip() for a in requested_analyses.split(",") if a.strip()]
     sys_log(f"Upload: {file.filename} for {analyses}")
+
+    # Auto-spawn plugin containers for any requested analysis categories if currently STOPPED
+    if analyses:
+        avail_resp = list_available_plugins()
+        for p in avail_resp.get("plugins", []):
+            if p["category"] in analyses:
+                if p.get("status") not in ["RUNNING", "BUILDING", "STARTING"]:
+                    sys_log(f"Auto-spawning plugin container: {p['category']}/{p['name']}")
+                    background_tasks.add_task(bg_start_plugin, p["name"], p["category"])
+
     r.publish("xbin:events", json.dumps({"type": "NEW_BINARY", "filename": file.filename, "path": f"/app/uploads/{file.filename}", "requested_analyses": analyses}))
     return {"status": "success"}
 

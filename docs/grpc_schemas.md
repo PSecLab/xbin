@@ -111,6 +111,10 @@ Identifies the start and end of functions.
 
 ---
 
+> [!IMPORTANT]
+> **Schema & Binding Synchronization**:
+> If you modify or extend the gRPC service definition (`orchestrator.proto`), REST API endpoints, or JSON payload schemas (`result_data`), you **MUST** update the corresponding Python client bindings and datatypes in `libxbin` ([`src/libxbin/models.py`](../src/libxbin/models.py) and [`src/libxbin/client.py`](../src/libxbin/client.py)) to ensure the client library remains synchronized with the orchestrator.
+
 ## Feedback & Evolution
 The **xbin** protocol is designed to be highly extensible. If you are building a new type of analysis (e.g., Taint Analysis or Type Recovery) and have suggestions for standardizing the `result_data` schema for your domain, we highly value your input. 
 
