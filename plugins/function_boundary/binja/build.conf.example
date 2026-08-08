@@ -1,0 +1,6 @@
+# Inputs for ./build.sh, which bakes a Binary Ninja install + license into this
+# plugin's image out-of-band (see .xbin-prebuilt).
+#
+# Copy to `build.conf` (gitignored) and fill in your own paths.
+binja dir: "/path/to/binaryninja"
+license path: "/path/to/license.dat"

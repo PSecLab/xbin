@@ -1,0 +1,13 @@
+name     = "fid"
+category = "signature_matching"
+# Ghidra FunctionID signature matching: high-precision identity matches, so it
+# outranks the semantic recoverers when both post for the same function.
+weight   = 1.0
+tiers    = ["smoke", "full", "heavy"]
+e2e_timeout = 1800
+
+# Ghidra project + FID run artifacts. Persisting them lets a re-run of the same
+# binary skip the reference analysis.
+[[mounts]]
+cache  = "job_outputs"
+target = "/home/bind/Morpheus/job_outputs"

@@ -7,13 +7,40 @@ real 2MB firmware) so it stays hermetic and fast.
 """
 import json
 import os
+import sys
 import time
 
+import pytest
 import redis
 import requests
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 UPLOADS = os.path.join(_REPO_ROOT, "uploads")
+PLUGINS = os.path.join(_REPO_ROOT, "plugins")
+
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src", "xbin_orchestrator"))
+from plugin_manifest import DEFAULT_WEIGHT, iter_plugin_dirs, read_manifest  # noqa: E402
+
+
+def _installed_manifests():
+    """The on-disk truth about the installed plugins, as the orchestrator reads it."""
+    out = {}
+    for root in iter_plugin_dirs([PLUGINS]):
+        m = read_manifest(root)
+        if not m.get("name") or not m.get("category"):
+            continue
+        source = "".join(
+            open(os.path.join(root, f), encoding="utf-8", errors="ignore").read()
+            for f in sorted(os.listdir(root)) if f.endswith(".py")
+        )
+        out[root] = {
+            "name": m["name"],
+            "category": m["category"],
+            "weight": m.get("weight", DEFAULT_WEIGHT),
+            "is_ranker": "is_ranker=True" in source,
+            "is_validator": "is_validator=True" in source,
+        }
+    return out
 
 
 def _cleanup(*names):
@@ -85,31 +112,35 @@ def test_health_shape(rest_base, clean_redis):
 
 
 def test_plugins_available_shape(rest_base, clean_redis):
+    """Discovery reports exactly the installed plugins, with their declared
+    weights. The expected set is read from the manifests rather than restated
+    here, so this test keeps working as plugins are added or removed -- and
+    fails if the API and the on-disk manifests ever disagree."""
     d = requests.get(f"{rest_base}/api/v1/plugins/available", timeout=10).json()
     plugins = {(p["name"], p["category"]): p for p in d["plugins"]}
-    # All five BINDonly plugins are discovered statically (no containers running).
-    expected = {
-        ("fid", "signature_matching"),
-        ("ghidriff", "signature_matching"),
-        ("bind_arbiter", "signature_matching"),
-        ("bind_se", "equation_recovery"),
-        ("symbolic_regression", "equation_recovery"),
-        ("angr_cfg", "cfg_generation"),
-        ("radare_cfg", "cfg_generation"),
-        ("angr_boundaries", "function_boundary"),
-        ("radare_boundaries", "function_boundary"),
-        ("binja", "function_boundary"),
-        ("boundary_ranker", "function_boundary"),
-        ("boundary_validator", "function_boundary"),
-        ("flirt_matcher", "symbol_matching"),
-    }
+
+    manifests = _installed_manifests()
+    expected = {(m["name"], m["category"]) for m in manifests.values()}
     assert expected.issubset(set(plugins.keys())), f"missing: {expected - set(plugins.keys())}"
-    # bind_arbiter is the ranker for signature_matching; equation_recovery has none.
-    assert plugins[("bind_arbiter", "signature_matching")]["is_ranker"] is True
-    assert d["rankers"].get("signature_matching") == "bind_arbiter"
-    assert d["rankers"].get("equation_recovery") == "Baseline"
-    # Static metadata (display_name/description) is discovered from source.
-    assert plugins[("fid", "signature_matching")]["display_name"]
+
+    # Each plugin's consensus weight round-trips from its manifest to the API.
+    for m in manifests.values():
+        api_weight = plugins[(m["name"], m["category"])]["weight"]
+        assert api_weight == pytest.approx(m["weight"]), (
+            f"{m['name']}: manifest weight {m['weight']} but API reports {api_weight}")
+
+    # Rankers are discovered statically, before any container runs.
+    for m in manifests.values():
+        if m["is_ranker"]:
+            assert plugins[(m["name"], m["category"])]["is_ranker"] is True
+            assert d["rankers"].get(m["category"]) == m["name"]
+    # A category with no ranker falls back to the baseline consensus math.
+    ranked = {m["category"] for m in manifests.values() if m["is_ranker"]}
+    for category in {m["category"] for m in manifests.values()} - ranked:
+        assert d["rankers"].get(category) == "Baseline"
+
+    # Static metadata (display_name) is discovered from source, not invented.
+    assert all(p["display_name"] for p in plugins.values())
 
 
 def test_blackboard_empty(rest_base, clean_redis):

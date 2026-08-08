@@ -73,9 +73,13 @@ See [xbin_external_example](https://github.com/PSecLab/xbin_external_example)
 for a minimal standalone plugin repo.
 
 A plugin whose image is too heavy for the orchestrator to build (e.g. one
-extending a licensed Binary Ninja base) can ship a `.xbin-prebuilt` marker and
-its own `build.sh`. The orchestrator then reuses the existing image and skips
-the build entirely.
+extending a licensed base) can ship a `.xbin-prebuilt` marker and its own
+`build.sh`. The orchestrator then reuses the existing image and skips the build
+entirely.
+
+Where several plugins share one heavy base image, that image's build scripts and
+shared code live in a bundle under `plugins/_bases/<image>/` — so the whole
+family stays self-contained and can be lifted out of the repo together.
 
 ## 🚥 Running an Analysis (end to end)
 
@@ -122,8 +126,25 @@ COPY . .
 CMD ["python", "my_worker.py"]
 ```
 
-### 3. Register
+### 3. Declare it
+Add an `xbin-plugin.toml` next to the Dockerfile so the orchestrator knows how to
+weight and run your tool — this is how a plugin tells the core what it needs,
+instead of the core hardcoding it:
+
+```toml
+name     = "my_analyzer"
+category = "symbol_matching"
+weight   = 0.9              # multiplier on your confidence when scoring (default 0.5)
+```
+
+See the [SDK Reference](docs/sdk_reference.md#-the-plugin-manifest-xbin-plugintoml)
+for every field.
+
+### 4. Register
 Drop your folder into `plugins/<category>/`. The orchestrator will automatically find it and show a **Start** button on the dashboard.
+
+A runnable copy-paste starting point lives in
+[`examples/hello_plugin/`](examples/hello_plugin/).
 
 ## 📦 Out-of-Tree Plugins
 
@@ -148,13 +169,13 @@ The project includes an automated integration test suite using `pytest`. The tes
 
 To run the test suite:
 ```bash
-# Ensure pytest is installed
-pip install pytest
-
-# Run the suite
-pytest tests/ -v
+make setup          # .venv + pip install -e . pytest   (needs python >= 3.11)
+make test           # fast, Docker-free lane
+pytest -m e2e       # opt-in full-stack run against real plugin containers
 ```
-The test suite automatically spins up a background Orchestrator and isolated Redis instance for the duration of the run.
+The suite automatically spins up a background Orchestrator and isolated Redis instance for the duration of the run. It also enforces the project's layering rule — that the core names no specific analysis tool — in `tests/test_core_is_plugin_agnostic.py`.
+
+See the [End-to-End Testing Guide](docs/e2e_testing.md) for the full walkthrough.
 
 ## 📡 The RPC Scheme
 
@@ -187,9 +208,15 @@ Our RPC and JSON schemes are evolving. If you have suggestions for better multi-
 
 ## 🏗️ Architecture
 
-For the full picture — the Morpheus/BIND tool layout, consensus math, and the
+For the full picture — consensus math, the blackboard key conventions, and the
 non-obvious parts of the plugin/Docker system — see the
 **[Architecture Notes](docs/architecture.md)**.
+
+The repo is organised around one rule: **the core knows nothing about any
+specific analysis tool.** `src/`, `scripts/` and `docs/` are tool-agnostic;
+everything a tool needs — its build scripts, shared helpers, readiness checks,
+documentation and issue log — lives in its own directory under `plugins/`. The
+test suite enforces it.
 
 - **Orchestrator**: FastAPI (REST/Web) + gRPC (Worker Comm) + Docker CLI (Container Management).
 - **SDK**: A reactive wrapper using Redis Pub/Sub for events and gRPC for reporting.

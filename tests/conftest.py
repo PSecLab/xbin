@@ -10,7 +10,13 @@ _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(os.path.join(_REPO_ROOT, "src"))
 sys.path.append(os.path.join(_REPO_ROOT, "scripts"))
 
-from e2e_driver import wait_for_ready, REST_BASE  # single readiness gate (see scripts/e2e_driver.py)
+from e2e_driver import (  # single readiness gate (see scripts/e2e_driver.py)
+    GRPC_PORT,
+    REST_BASE,
+    REST_PORT,
+    _port_open,
+    wait_for_ready,
+)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -21,6 +27,18 @@ def orchestrator_server():
     resolve, and gates on a real readiness poll (gRPC :50051 open + REST /health
     200) instead of a blind sleep.
     """
+    # Never run against an orchestrator we did not start. The `clean_redis`
+    # fixture below flushes the DB directly, so attaching to someone else's
+    # instance silently destroys its blackboard and leaves its workers pointing
+    # at empty state -- a very confusing way to lose a long analysis run.
+    if _port_open(REST_PORT) or _port_open(GRPC_PORT):
+        pytest.exit(
+            f"An orchestrator is already listening on :{REST_PORT}/:{GRPC_PORT}.\n"
+            "The test suite flushes Redis between tests, which would wipe its blackboard.\n"
+            "Stop it before running the tests.",
+            returncode=1,
+        )
+
     env = os.environ.copy()
     env["PYTHONPATH"] = "src:src/xbin_orchestrator"
 

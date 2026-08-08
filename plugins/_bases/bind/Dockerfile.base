@@ -1,0 +1,21 @@
+# Thin xbin layer over the Morpheus stack -> the final `bind:latest`.
+#
+# Named Dockerfile.base, not Dockerfile, on purpose: the orchestrator discovers
+# plugins by walking for a file named exactly `Dockerfile`, so this bundle stays
+# invisible to discovery and never shows up as a phantom plugin card.
+#
+# Everything expensive (Ghidra, Binary Ninja, the QEMU fork, PySR) is already in
+# the stage-1 image. This layer only adds the Python helpers the BIND plugins
+# share, which means editing bind_helpers.py is a seconds-long rebuild instead
+# of a multi-hour one.
+ARG BIND_STAGE1=bind-morpheus:latest
+FROM ${BIND_STAGE1}
+
+# Shared helpers for the BIND plugin family (config generation, the BN n Ghidra
+# function universe, ELF -> raw Cortex-M flash conversion). These used to live
+# in the xbin SDK package, which meant every unrelated plugin image carried
+# them; they belong to this base image instead. Plugin Dockerfiles put
+# /opt/xbin_bind on PYTHONPATH and `import bind_helpers`.
+COPY --chown=bind:bind bind_helpers.py /opt/xbin_bind/bind_helpers.py
+
+ENV XBIN_BIND_HELPERS=/opt/xbin_bind

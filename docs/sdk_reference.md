@@ -21,7 +21,7 @@ The following diagram illustrates how the **Orchestrator**, **Redis (Blackboard)
      |             |             |             |
 +----v-----+  +----v-----+  +----v-----+  +----v-----+
 | Worker A |  | Worker B |  | Validator|  |  Ranker  |
-| (angr)   |  | (radare) |  | (Checks) |  | (Judges) |
+| (Tool A) |  | (Tool B) |  | (Checks) |  | (Judges) |
 +----------+  +----------+  +----------+  +----------+
 ```
 
@@ -170,3 +170,63 @@ Specifically for Rankers. Updates the absolute consensus score of a hypothesis.
 Fetch current results from the blackboard.
 - `category`: The blackboard category to query.
 - `item_key`: Optional. Filter for a specific item.
+
+---
+
+## 📋 The Plugin Manifest (`xbin-plugin.toml`)
+
+Drop this next to your `Dockerfile`. It is how a plugin declares the things the
+orchestrator would otherwise have to hardcode about it — which is what keeps the
+core free of any knowledge of your tool.
+
+Every field is optional; a plugin with no manifest still works and keeps the
+defaults. **Always declare `weight`**, though: without it your backend silently
+scores at the `0.5` fallback.
+
+```toml
+name     = "my_matcher"          # backend name; overrides the decorator + dir name
+category = "signature_matching"  # blackboard category
+weight   = 0.95                  # multiplier on raw confidence when scoring (0.0-1.0)
+shm_size = "1g"                  # only if the worker boots an emulator or similar
+tiers    = ["smoke", "full"]     # e2e tiers this plugin belongs to
+e2e_timeout = 1800               # this plugin's contribution to the tier's timeout
+
+[[mounts]]                       # persistent cache, survives container restarts
+cache  = "job_outputs"           # plain dir name; becomes <CACHE_DIR>/job_outputs
+target = "/opt/mytool/job_outputs"   # absolute path inside the container
+```
+
+| Field | Default | Effect |
+|---|---|---|
+| `name`, `category` | decorator, then directory names | Discovery precedence is **manifest > decorator > directory**. |
+| `weight` | `0.5` | Feeds `BACKEND_WEIGHTS`; an operator can override with `XBIN_BACKEND_WEIGHTS` (JSON). |
+| `shm_size` | `1g` (or `XBIN_DEFAULT_SHM_SIZE`) | `docker run --shm-size`. Docker's own default is 64M. |
+| `tiers` | none | Tier membership for `scripts/e2e_driver.py`. A tier's fleet, required categories and timeout are all derived from these. |
+| `e2e_timeout` | `1800` | A tier's timeout is the max over its member plugins. |
+| `[[mounts]]` | none | `cache` must be a plain directory name and `target` an absolute path, or the entry is rejected. |
+
+The manifest is surfaced on `/api/v1/plugins/available` and through
+`libxbin`'s `PluginInfo` (`weight`, `tiers`).
+
+### Beyond the manifest
+
+Two more things a plugin can contribute, both discovered by filename:
+
+- **`preflight_checks.py`** — expose `checks(tier, ctx) -> list[Check]` and
+  `scripts/preflight.py` will run it. `ctx` supplies `ctx.run`, `ctx.port_open`,
+  `ctx.Check`, `ctx.PASS/FAIL/WARN` and `ctx.repo_root`, so you import nothing
+  from the core. Give each check its own remediation string.
+- **`stage.sh`** — stages test fixtures into `uploads/`; `make stage` runs every
+  one it finds.
+
+### Shared base images
+
+When several plugins share one heavy base image, put its build scripts, shared
+helpers and docs in `plugins/_bases/<image>/`, and name the build file
+**`Dockerfile.base`**. Discovery keys on the exact filename `Dockerfile`, so a
+bundle containing one would be picked up as a phantom plugin.
+
+If the orchestrator cannot build your image at all (a licensed or multi-hour
+base), ship a `.xbin-prebuilt` marker plus your own `build.sh`: the orchestrator
+then reuses the existing image and skips the build, and errors with a pointer to
+your `build.sh` if the image is missing.

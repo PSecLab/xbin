@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Full-stack end-to-end driver for xbin (BINDonly).
+"""Full-stack end-to-end driver for xbin.
 
 Boots (or attaches to) the orchestrator, starts the plugin containers via the
 REST API, waits for them to become RUNNING+HEALTHY, uploads a firmware binary,
@@ -7,15 +7,21 @@ polls the blackboard until the expected categories populate, then prints a rich
 per-function summary. Exits nonzero on any failure (plugin crash, empty result
 category, timeout).
 
-Tiers map onto the cost tiers documented in docs/e2e_testing.md:
-  smoke  fid + ghidriff                          (signature_matching; no ollama/QEMU)
-  full   + bind_se + bind_arbiter                (+ equation_recovery; +angr +ollama)
-  heavy  + symbolic_regression                   (+ QEMU/FastDyn dynamic run + PySR)
+Tiers are NOT defined here. Each plugin declares which tiers it belongs to in
+its `xbin-plugin.toml`, and this driver derives the rest:
+
+  tier names       union of every plugin's `tiers`
+  a tier's fleet   the plugins declaring that tier
+  required cats    the categories of those plugins
+  result timeout   the max of their `e2e_timeout` values
+
+So adding a plugin to a tier is a one-line manifest edit, and a deployment with
+entirely different tools gets working tiers for free.
 
 Usage:
-  python scripts/e2e_driver.py --smoke              # boot orchestrator, run, tear down
-  python scripts/e2e_driver.py --full --attach      # use an already-running orchestrator
-  python scripts/e2e_driver.py --heavy --teardown   # also stop plugin containers at the end
+  python scripts/e2e_driver.py --tier smoke         # boot orchestrator, run, tear down
+  python scripts/e2e_driver.py --tier full --attach # use an already-running orchestrator
+  python scripts/e2e_driver.py --list-tiers         # show what the manifests define
 
 This module is also imported by tests/conftest.py (for wait_for_ready) and
 tests/test_e2e_pipeline.py (run_tier), so keep the importable API stable.
@@ -32,58 +38,83 @@ import time
 import urllib.request
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
+
+try:
+    from xbin_orchestrator.plugin_manifest import iter_plugin_dirs, read_manifest
+except ImportError:  # running from a checkout without the package importable
+    sys.path.insert(0, os.path.join(REPO_ROOT, "src", "xbin_orchestrator"))
+    from plugin_manifest import iter_plugin_dirs, read_manifest
 
 GRPC_PORT = 50051
 REST_PORT = 8000
 REST_BASE = f"http://localhost:{REST_PORT}"
 
-# Category constants (mirror src/xbin/bind_helpers.py).
-CAT_SIGNATURE = "signature_matching"
-CAT_EQUATION = "equation_recovery"
+PLUGINS_DIR = os.environ.get("XBIN_PLUGINS_DIR") or os.path.join(REPO_ROOT, "plugins")
 
-# name -> category for every plugin the orchestrator can start.
-ALL_PLUGINS = {
-    "fid": CAT_SIGNATURE,
-    "ghidriff": CAT_SIGNATURE,
-    "bind_arbiter": CAT_SIGNATURE,
-    "bind_se": CAT_EQUATION,
-    "symbolic_regression": CAT_EQUATION,
-}
+# Default per-plugin contribution to a tier's result timeout, when a manifest
+# declares tier membership but no e2e_timeout.
+DEFAULT_E2E_TIMEOUT = 1800
 
-# Per-tier plugin fleet (ordered), requested analyses, and the categories that
-# MUST be non-empty for the run to count as a success.
-TIERS = {
-    "smoke": {
-        "plugins": [("fid", CAT_SIGNATURE), ("ghidriff", CAT_SIGNATURE)],
-        "requested": CAT_SIGNATURE,
-        "require": [CAT_SIGNATURE],
-        "result_timeout": 1800,     # ~30 min: Ghidra import + FID/BSim on a 2MB image
-    },
-    "full": {
-        "plugins": [
-            ("fid", CAT_SIGNATURE), ("ghidriff", CAT_SIGNATURE),
-            ("bind_arbiter", CAT_SIGNATURE), ("bind_se", CAT_EQUATION),
-        ],
-        "requested": f"{CAT_SIGNATURE},{CAT_EQUATION}",
-        "require": [CAT_SIGNATURE, CAT_EQUATION],
-        "result_timeout": 9000,     # ~2.5h: bind_se symbolic execution (7200s cap)
-    },
-    "heavy": {
-        "plugins": [
-            ("fid", CAT_SIGNATURE), ("ghidriff", CAT_SIGNATURE),
-            ("bind_arbiter", CAT_SIGNATURE), ("bind_se", CAT_EQUATION),
-            ("symbolic_regression", CAT_EQUATION),
-        ],
-        "requested": f"{CAT_SIGNATURE},{CAT_EQUATION}",
-        "require": [CAT_SIGNATURE, CAT_EQUATION],
-        "result_timeout": 21600,    # ~6h: + QEMU/FastDyn dynamic run per float fn + PySR
-    },
-}
+# Sidecar suffixes the upload convention creates next to a target; never a
+# candidate for "the binary to analyze".
+_SIDECAR_SUFFIXES = (".reference", ".fidb", ".bndb", ".setup_end", ".fw.bin", ".funcs", ".log")
 
-DEFAULT_BINARY = os.environ.get(
-    "XBIN_TEST_BINARY",
-    os.path.join(REPO_ROOT, "submodules", "Morpheus", "example_config", "gs3.bin"),
-)
+
+def build_tiers(plugins_dir: str = PLUGINS_DIR) -> dict:
+    """Derive the tier table from the installed plugins' manifests."""
+    tiers: dict = {}
+    for root in iter_plugin_dirs([plugins_dir]):
+        manifest = read_manifest(root)
+        name = manifest.get("name")
+        category = manifest.get("category")
+        declared = manifest.get("tiers") or []
+        if not name or not category or not declared:
+            continue
+        timeout = manifest.get("e2e_timeout", DEFAULT_E2E_TIMEOUT)
+        for tier in declared:
+            cfg = tiers.setdefault(str(tier), {"plugins": [], "require": set(), "result_timeout": 0})
+            cfg["plugins"].append((str(name), str(category)))
+            cfg["require"].add(str(category))
+            try:
+                cfg["result_timeout"] = max(cfg["result_timeout"], int(timeout))
+            except (TypeError, ValueError):
+                cfg["result_timeout"] = max(cfg["result_timeout"], DEFAULT_E2E_TIMEOUT)
+    for cfg in tiers.values():
+        # Sorted for a deterministic start order; the fleet is waited on as a
+        # whole afterwards, so the order itself carries no meaning.
+        cfg["plugins"].sort(key=lambda p: (p[1], p[0]))
+        cfg["require"] = sorted(cfg["require"])
+        cfg["requested"] = ",".join(cfg["require"])
+    return tiers
+
+
+TIERS = build_tiers()
+
+
+def _discover_test_binary() -> str:
+    """Pick a target from uploads/ when XBIN_TEST_BINARY is not set.
+
+    Plugins that need particular test firmware stage it into uploads/ with their
+    own stage.sh, so the driver does not need to know where any tool's fixtures
+    come from."""
+    env = os.environ.get("XBIN_TEST_BINARY")
+    if env:
+        return env
+    uploads = os.path.join(REPO_ROOT, "uploads")
+    if os.path.isdir(uploads):
+        candidates = sorted(
+            os.path.join(uploads, f) for f in os.listdir(uploads)
+            if not f.startswith(".")
+            and os.path.isfile(os.path.join(uploads, f))
+            and not f.endswith(_SIDECAR_SUFFIXES)
+        )
+        if candidates:
+            return candidates[0]
+    return os.path.join(uploads, "<stage a target first>")
+
+
+DEFAULT_BINARY = _discover_test_binary()
 
 
 # --------------------------------------------------------------------------- #
@@ -315,7 +346,7 @@ def _resolved_text(data):
     return json.dumps(data)[:60]
 
 
-def summarize(client: XbinClient, categories):
+def summarize(client: XbinClient, categories, expected_backends=()):
     print("\n" + "=" * 72, flush=True)
     print("E2E RESULT SUMMARY", flush=True)
     print("=" * 72, flush=True)
@@ -358,11 +389,31 @@ def summarize(client: XbinClient, categories):
         print(f"  -- audit trail: {n_audit} entries", flush=True)
     print("\nHypotheses by backend (all categories): "
           + (", ".join(f"{b}:{n}" for b, n in sorted(grand_backends.items())) or "none"), flush=True)
-    # Explicitly call out symbolic_regression coverage (the QEMU-dependent tool).
-    sr = grand_backends.get("symbolic_regression", 0)
-    print(f"symbolic_regression hypotheses: {sr}"
-          + (" (0 -- check SR container logs / float-function filter)" if sr == 0 else ""),
-          flush=True)
+    # Call out every producer in the fleet that contributed nothing. A
+    # started-but-silent producer is the failure mode worth surfacing, and naming
+    # no tool in particular keeps this driver usable for any plugin set.
+    #
+    # Rankers and verifiers are excluded by role, not by name: a ranker calls
+    # update_rank and a verifier submit_verification, so neither ever posts a
+    # hypothesis. Counting them as "silent" would flag a perfectly healthy
+    # arbiter on every single run and train the reader to ignore the line.
+    if expected_backends:
+        roles = {}
+        try:
+            for p in client.available().get("plugins", []):
+                roles[p["name"]] = (p.get("is_ranker"), p.get("is_validator"))
+        except Exception:
+            pass
+        producers, non_producers = [], []
+        for b in expected_backends:
+            is_ranker, is_validator = roles.get(b, (False, False))
+            (non_producers if (is_ranker or is_validator) else producers).append(b)
+        silent = sorted(b for b in producers if not grand_backends.get(b))
+        print(f"silent producers: {', '.join(silent) if silent else 'none'}"
+              + ("  (check their container logs)" if silent else ""), flush=True)
+        if non_producers:
+            print("not producers (post no hypotheses by role): "
+                  + ", ".join(sorted(non_producers)), flush=True)
     print("=" * 72 + "\n", flush=True)
 
 
@@ -403,7 +454,7 @@ def run_tier(tier: str, attach: bool = False, binary: str | None = None,
         log(f"upload response: {resp}")
 
         poll_results(client, cfg["require"], cfg["plugins"], timeout=result_timeout)
-        summarize(client, cfg["require"])
+        summarize(client, cfg["require"], [n for n, _c in cfg["plugins"]])
         log("E2E PASSED")
         return 0
     except Exception as e:
@@ -427,10 +478,16 @@ def run_tier(tier: str, attach: bool = False, binary: str | None = None,
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="xbin full-stack E2E driver")
+    known = sorted(TIERS)
     g = ap.add_mutually_exclusive_group()
-    g.add_argument("--smoke", action="store_const", dest="tier", const="smoke")
-    g.add_argument("--full", action="store_const", dest="tier", const="full")
-    g.add_argument("--heavy", action="store_const", dest="tier", const="heavy")
+    g.add_argument("--tier", dest="tier", default=None,
+                   help=f"tier to run (defined by the plugin manifests; found: {', '.join(known) or 'none'})")
+    # Shorthand flags for whatever tiers the manifests actually define, so
+    # `--smoke` keeps working without this file naming any tier itself.
+    for tier_name in known:
+        g.add_argument(f"--{tier_name}", action="store_const", dest="tier", const=tier_name,
+                       help=f"shorthand for --tier {tier_name}")
+    ap.add_argument("--list-tiers", action="store_true", help="print the derived tiers and exit")
     ap.add_argument("--attach", action="store_true", help="use an already-running orchestrator")
     ap.add_argument("--binary", default=None, help=f"firmware to analyze (default: {DEFAULT_BINARY})")
     ap.add_argument("--reference", default=None, help="optional symbolized reference binary")
@@ -439,7 +496,23 @@ def main() -> int:
     ap.add_argument("--result-timeout", type=float, default=None)
     ap.add_argument("--orch-log", default=None, help="write orchestrator output to this file")
     args = ap.parse_args()
-    tier = args.tier or "smoke"
+
+    if args.list_tiers:
+        if not TIERS:
+            print("no tiers defined -- no installed plugin declares `tiers` in its xbin-plugin.toml")
+            return 0
+        for tier_name in sorted(TIERS):
+            cfg = TIERS[tier_name]
+            print(f"{tier_name}:")
+            print(f"  plugins        {', '.join(f'{n} ({c})' for n, c in cfg['plugins'])}")
+            print(f"  requires       {', '.join(cfg['require'])}")
+            print(f"  result timeout {cfg['result_timeout']}s")
+        return 0
+
+    tier = args.tier or ("smoke" if "smoke" in TIERS else (sorted(TIERS)[0] if TIERS else None))
+    if tier not in TIERS:
+        log(f"[x] unknown tier {tier!r}; defined by the manifests: {', '.join(sorted(TIERS)) or 'none'}")
+        return 2
     return run_tier(tier, attach=args.attach, binary=args.binary, reference=args.reference,
                     teardown=args.teardown, build_timeout=args.build_timeout,
                     result_timeout=args.result_timeout, orch_log=args.orch_log)

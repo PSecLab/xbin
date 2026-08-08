@@ -1,0 +1,10 @@
+name     = "ghidriff"
+category = "signature_matching"
+# ghidriff / BSim binary diffing against a symbolized reference.
+weight   = 0.95
+tiers    = ["smoke", "full", "heavy"]
+e2e_timeout = 1800
+
+[[mounts]]
+cache  = "job_outputs"
+target = "/home/bind/Morpheus/job_outputs"

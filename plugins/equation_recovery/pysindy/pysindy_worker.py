@@ -21,9 +21,9 @@ import os
 import sys
 
 import xbin
-from xbin.bind_helpers import CAT_EQUATION
+from bind_helpers import CAT_EQUATION
 
-# pysyndy tree baked into pysindy:latest by scripts/build_pysindy_base.sh; holds
+# pysyndy tree baked into pysindy:latest by plugins/_bases/pysindy/build.sh; holds
 # xbin_api.py at the root and the recovery core under binja_scripts/.
 _PYSINDY_ROOT = os.environ.get("PYSINDY_ROOT", "/home/bind/pysyndy")
 

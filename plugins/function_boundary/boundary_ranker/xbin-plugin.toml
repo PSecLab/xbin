@@ -1,0 +1,4 @@
+name     = "boundary_ranker"
+category = "function_boundary"
+# Ranker for function_boundary.
+weight   = 1.0

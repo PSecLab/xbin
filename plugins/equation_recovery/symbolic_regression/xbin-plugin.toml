@@ -1,0 +1,14 @@
+name     = "symbolic_regression"
+category = "equation_recovery"
+# PySR symbolic regression + LLM explanation. The practical equation_recovery
+# producer on large firmware, so it is the highest-weighted recoverer.
+weight   = 0.90
+tiers    = ["heavy"]
+e2e_timeout = 21600
+# Boots the firmware under a system-mode emulator, whose RAM is backed by a
+# 512M /dev/shm file -- Docker's 64M default is not enough.
+shm_size = "1g"
+
+[[mounts]]
+cache  = "job_outputs"
+target = "/home/bind/Morpheus/job_outputs"

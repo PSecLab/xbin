@@ -10,14 +10,14 @@
 # baked into bind:latest, so no reference upload is required.
 #
 # Usage:
-#   scripts/fetch_test_binaries.sh                 # stage gs3.bin
-#   scripts/fetch_test_binaries.sh --selfmatch     # also stage the arducopter ELF as a self-match target
-#   scripts/fetch_test_binaries.sh --announce signature_matching   # also print the ready curl command
-#   scripts/fetch_test_binaries.sh --apj <file|url>   # (advanced) extract a matched CubeOrange image from an ArduPilot .apj
+#   plugins/_bases/bind/stage.sh                 # stage gs3.bin
+#   plugins/_bases/bind/stage.sh --selfmatch     # also stage the arducopter ELF as a self-match target
+#   plugins/_bases/bind/stage.sh --announce signature_matching   # also print the ready curl command
+#   plugins/_bases/bind/stage.sh --apj <file|url>   # (advanced) extract a matched CubeOrange image from an ArduPilot .apj
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$HERE/.." && pwd)"
+REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 UPLOADS="$REPO_ROOT/uploads"
 mkdir -p "$UPLOADS"
 

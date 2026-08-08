@@ -37,6 +37,6 @@ testpaths = ["tests"]
 # `pytest -m e2e` (a user-supplied -m overrides this default).
 addopts = "-ra -m 'not e2e'"
 markers = [
-    "e2e: full-stack pipeline; needs Docker + bind:latest (+ ollama for full/heavy). Opt-in.",
+    "e2e: full-stack pipeline; needs Docker plus whatever base images and services the installed plugins declare. Opt-in.",
     "slow: long-running (minutes to hours).",
 ]

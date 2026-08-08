@@ -32,6 +32,13 @@ except (ImportError, ValueError):
     from . import orchestrator_pb2
     from . import orchestrator_pb2_grpc
 
+try:
+    from plugin_manifest import (DEFAULT_WEIGHT, collect_backend_weights, manifest_mounts,
+                                 manifest_shm_size, read_manifest)
+except ImportError:
+    from .plugin_manifest import (DEFAULT_WEIGHT, collect_backend_weights, manifest_mounts,
+                                  manifest_shm_size, read_manifest)
+
 # ==========================================
 # CONFIGURATION
 # ==========================================
@@ -54,7 +61,7 @@ CACHE_DIR = os.getenv("XBIN_CACHE_DIR") or os.path.join(_REPO_ROOT, "cache")
 # Scratch/temp on the big disk, NOT root. This server's /tmp lives on the small
 # root filesystem (~50G free); the repo (and Docker's data-root) live on the
 # multi-TB /evaldisk. Point every host-side tempfile (the plugin build staging in
-# _build_plugin_image, bind_helpers' config temps, etc.) at a repo-local scratch
+# _build_plugin_image, a plugin's per-run config temps, etc.) at a repo-local scratch
 # dir so a build or run can never fill root. Container-internal scratch already
 # lands on evaldisk via Docker's data-root. Override with XBIN_TMPDIR if desired.
 SCRATCH_DIR = os.getenv("XBIN_TMPDIR") or os.path.abspath(".xbin_scratch")
@@ -77,25 +84,32 @@ WORKER_ENV_PASSTHROUGH = tuple(
 )
 
 # Per-backend consensus weights (multiplied into each result's raw confidence).
-# The four BIND tools + the ollama arbiter. Signature matchers (fid/ghidriff)
-# produce high-precision identity matches, so they carry more weight than the
-# semantic recoverers (bind_se/symbolic_regression). Unknown backends -> 0.5.
-BACKEND_WEIGHTS = {
-    "fid": 1.0,                  # Ghidra FunctionID signature matching
-    "ghidriff": 0.95,           # Ghidra ghidriff / BSim binary diffing
-    "flirt_matcher": 0.95,       # IDA FLIRT signature matching
-    "angr_cfg": 0.90,           # angr CFG generation
-    "radare_cfg": 0.85,         # radare2 CFG generation
-    "angr_boundaries": 0.90,    # angr function boundary discovery
-    "radare_boundaries": 0.85,  # radare2 function boundary discovery
-    "binja": 1.0,               # Binary Ninja boundary discovery
-    "boundary_ranker": 1.0,     # Boundary ranker
-    "boundary_validator": 1.0,  # Boundary validator
-    "symbolic_regression": 0.90, # PySR symbolic regression + ollama explanation (highest-priority recoverer)
-    "bind_se": 0.85,            # angr symbolic execution + ollama explanation
-    "pysindy": 0.85,            # BIND binary->equation (Binja structure + numpy STLSQ sparse regression)
-    "bind_arbiter": 1.0,        # ollama arbiter (ranker)
-}
+# Deliberately NOT a literal table: each plugin declares its own weight in its
+# `xbin-plugin.toml`, so adding or retuning a tool never touches the core. The
+# map is rebuilt from the discovered plugin dirs (in-tree and out-of-tree alike);
+# a backend with no manifest keeps the DEFAULT_WEIGHT fallback.
+BACKEND_WEIGHTS = {}
+
+# Operator escape hatch: XBIN_BACKEND_WEIGHTS='{"<backend>": 0.8}' overrides whatever
+# the manifests declare, for tuning a running fleet without editing plugins.
+def _operator_weight_overrides():
+    raw = os.getenv("XBIN_BACKEND_WEIGHTS", "").strip()
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+        return {str(k): float(v) for k, v in parsed.items()}
+    except Exception:
+        return {}
+
+def refresh_backend_weights(fallback_names=None):
+    """Rebuild BACKEND_WEIGHTS from on-disk plugin manifests, in place."""
+    weights = collect_backend_weights(PLUGIN_DIRS, EXPLICIT_PLUGINS, fallback_names)
+    weights.update(_operator_weight_overrides())
+    BACKEND_WEIGHTS.clear()
+    BACKEND_WEIGHTS.update(weights)
+    return BACKEND_WEIGHTS
+
 MARGIN_THRESHOLD = 0.05
 
 r = redis.Redis(host=REDIS_HOST, port=6379, decode_responses=True)
@@ -111,6 +125,18 @@ def set_plugin_state(name, category, status, error=None):
     state = {"status": status, "last_update": time.time()}
     if error: state["error"] = error
     r.set(f"xbin:plugin_state:{category}:{name}", json.dumps(state))
+
+def _grpc_port_number():
+    """Numeric port out of GRPC_PORT's "[::]:50051" bind spec."""
+    try:
+        return int(GRPC_PORT.rsplit(":", 1)[1])
+    except (IndexError, ValueError):
+        return 50051
+
+def _port_in_use(port, host="127.0.0.1"):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+        s.settimeout(0.5)
+        return s.connect_ex((host, port)) == 0
 
 def ensure_redis():
     try:
@@ -155,18 +181,23 @@ app = FastAPI(title="xbin Multi-Analysis Orchestrator", version="1.8.0")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(REFERENCE_DIR, exist_ok=True)
-# Persistent worker caches (job_outputs = ghidriff diff / fid ghidra proj / SR out;
-# se_sigdb = bind_se signature DB). Created here + world-writable for the same
-# reason as uploads/ (workers run as uid bind=1000).
-CACHE_JOB_OUTPUTS = os.path.join(CACHE_DIR, "job_outputs")
-CACHE_SE_SIGDB = os.path.join(CACHE_DIR, "se_sigdb")
-# uploads/ is bind-mounted into every worker container, but the workers run as a
-# different uid (bind=1000) and cache sidecars (<bin>.setup_end, <bin>.bndb) next
-# to the firmware. Make it world-writable so bind_se/symbolic_regression can run.
-for _d in (UPLOAD_DIR, CACHE_JOB_OUTPUTS, CACHE_SE_SIGDB):
-    os.makedirs(_d, exist_ok=True)
-    try: os.chmod(_d, 0o777)
-    except OSError: pass
+
+def _make_world_writable(path):
+    """Create a host dir that worker containers can write to.
+
+    Every bind-mount handed to a worker needs this: containers run as their own
+    uid (not the orchestrator's), so a default-owned host dir leaves the worker
+    unable to write the sidecars and caches it mounts the dir for."""
+    os.makedirs(path, exist_ok=True)
+    try:
+        os.chmod(path, 0o777)
+    except OSError:
+        pass
+    return path
+
+# uploads/ is bind-mounted into every worker container regardless of plugin.
+# Per-plugin cache mounts are created on demand from each manifest's [[mounts]].
+_make_world_writable(UPLOAD_DIR)
 
 def get_container_name(name: str, category: str):
     return f"xbin-worker-{category.strip()}-{name.strip()}"
@@ -225,9 +256,10 @@ async def upload_binary(background_tasks: BackgroundTasks, file: UploadFile = Fi
                         reference_name: str = Form(""), requested_analyses: str = Form("")):
     file_path = os.path.join(UPLOAD_DIR, file.filename)
     with open(file_path, "wb") as buffer: shutil.copyfileobj(file.file, buffer)
-    # Symbolized reference binary saved next to the target under the sibling name
-    # the BIND plugins derive (<binary-stem>.reference) so ghidriff/bind_se diff
-    # against it instead of the baked default. Priority:
+    # Optional reference binary, saved next to the target under the sibling
+    # convention <binary-stem>.reference. Plugins that compare a target against
+    # a known-good build look for that sibling and fall back to their own
+    # default when it is absent. Priority:
     #   1. an explicitly uploaded custom reference, else
     #   2. a reference_name selected from the server-side library, else
     #   3. nothing -> the baked default reference applies.
@@ -310,7 +342,11 @@ def list_available_plugins():
     available = []
     health_data = r.hgetall("xbin:worker_health")
     now = time.time()
-    
+
+    # Pick up manifest edits (and newly added out-of-tree plugins) without a
+    # restart -- the dashboard polls this endpoint.
+    refresh_backend_weights()
+
     # 1. Discover plugins in PLUGIN_DIRS
     for pdir in PLUGIN_DIRS:
         if not os.path.exists(pdir): continue
@@ -350,13 +386,32 @@ def list_available_plugins():
             unique_available.append(p)
             seen.add(uid)
 
-    # Map each category to its active ranker name (if any is registered)
-    categories = list(set([p["category"] for p in unique_available] + ["signature_matching", "equation_recovery", "cfg_generation", "function_boundary", "symbol_matching"]))
+    # Map each category to its active ranker name (if any is registered).
+    # Categories are whatever the installed plugins and the live blackboard say
+    # they are -- the core ships no list of known analysis types.
+    categories = set(p["category"] for p in unique_available)
+    categories.update(blackboard_categories())
     ranker_map = {}
-    for cat in categories:
+    for cat in sorted(categories):
         ranker_map[cat] = next((p["name"] for p in unique_available if p["category"] == cat and p["is_ranker"]), "Baseline")
-    
+
     return {"plugins": unique_available, "rankers": ranker_map}
+
+def blackboard_categories():
+    """Categories that already have state on the blackboard.
+
+    Keeps a category visible on the dashboard after its producing plugin has
+    been stopped or removed, which the old hardcoded category list did by
+    accident."""
+    cats = set()
+    try:
+        for key in r.scan_iter("xbin:bb:*", count=500):
+            parts = key.split(":")
+            if len(parts) >= 4:
+                cats.add(parts[2])
+    except Exception:
+        pass
+    return cats
 
 def get_static_plugin_info(root):
     """Try to find the category and name in the source code first."""
@@ -388,6 +443,12 @@ def _get_plugin_info(root, name, category, docker_data, health_data, now):
     static_cat, static_name = get_static_plugin_info(root)
     if static_cat: category = static_cat
     if static_name: name = static_name
+
+    # A manifest is the most explicit source of all, so it wins over both the
+    # decorator scan and directory inference.
+    manifest = read_manifest(root)
+    if manifest.get("category"): category = str(manifest["category"])
+    if manifest.get("name"): name = str(manifest["name"])
 
     unique_id = f"{category}-{name}"
 
@@ -432,7 +493,14 @@ def _get_plugin_info(root, name, category, docker_data, health_data, now):
             if w_data.get("display_name"): display_name = w_data["display_name"]
             if w_data.get("description"): description = w_data["description"]
 
-    return {"name": name, "category": category, "status": status, "health": health_status, "last_beat": last_beat, "error": saved.get("error"), "is_validator": is_validator, "is_ranker": is_ranker, "display_name": display_name or name, "description": description}
+    weight = BACKEND_WEIGHTS.get(name)
+    if weight is None:
+        weight = DEFAULT_WEIGHT
+
+    return {"name": name, "category": category, "status": status, "health": health_status,
+            "last_beat": last_beat, "error": saved.get("error"), "is_validator": is_validator,
+            "is_ranker": is_ranker, "display_name": display_name or name, "description": description,
+            "weight": weight, "tiers": [str(t) for t in manifest.get("tiers", []) or []]}
 
 def _plugin_matches(root, name, category):
     static_cat, static_name = get_static_plugin_info(root)
@@ -514,21 +582,24 @@ def bg_start_plugin(name: str, category: str):
 
         set_plugin_state(name, category, "STARTING")
         subprocess.run(["docker", "rm", "-f", container_name], capture_output=True)
+        manifest = read_manifest(p_path)
         abs_uploads = os.path.abspath(UPLOAD_DIR)
-        abs_job_outputs = os.path.abspath(CACHE_JOB_OUTPUTS)
-        abs_se_sigdb = os.path.abspath(CACHE_SE_SIGDB)
-        # --shm-size: the pysindy/symbolic_regression dynamic runs boot Cortex-M
-        # firmware under QEMU system mode with a 512M /dev/shm memory-backend-file;
-        # the 64M container default is too small, so give every worker room.
-        run_cmd = ["docker", "run", "-d", "--name", container_name, "--network", "host", "--shm-size=1g",
-                   "-v", f"{abs_uploads}:/app/uploads",
-                   # Persist the reusable analysis caches across restarts so a
-                   # re-run of the same binary skips ghidriff's reference diff and
-                   # bind_se's already-recovered signatures.
-                   "-v", f"{abs_job_outputs}:/home/bind/Morpheus/job_outputs",
-                   "-v", f"{abs_se_sigdb}:/home/bind/Morpheus/signature_matching/signatures/se",
-                   "-e", "XBIN_ORCHESTRATOR=localhost:50051", "-e", "REDIS_HOST=localhost", "-e", "PYTHONUNBUFFERED=1"]
-        # Forward opt-in worker tunables (e.g. the bind_se fork-guard caps) when set.
+        # --shm-size: Docker's 64M default is too small for workers that boot an
+        # emulator (a system-mode guest backs its RAM with a /dev/shm file). The
+        # size is generic policy, overridable per-plugin via the manifest.
+        run_cmd = ["docker", "run", "-d", "--name", container_name, "--network", "host",
+                   f"--shm-size={manifest_shm_size(manifest)}",
+                   "-v", f"{abs_uploads}:/app/uploads"]
+        # Plugin-declared cache mounts ([[mounts]] in xbin-plugin.toml): persist
+        # a plugin's reusable analysis state across container restarts. The core
+        # only creates the host dir and wires the bind-mount; what goes in it is
+        # entirely the plugin's business.
+        for host_path, container_path in manifest_mounts(manifest, CACHE_DIR):
+            _make_world_writable(host_path)
+            run_cmd += ["-v", f"{os.path.abspath(host_path)}:{container_path}"]
+        run_cmd += ["-e", "XBIN_ORCHESTRATOR=localhost:50051", "-e", "REDIS_HOST=localhost",
+                    "-e", "PYTHONUNBUFFERED=1"]
+        # Forward opt-in worker tunables (declared by the operator) when set.
         for _var in WORKER_ENV_PASSTHROUGH:
             _val = os.environ.get(_var)
             if _val is not None:
@@ -592,10 +663,10 @@ def get_blackboard_audit(analysis_type: str):
 def _summary_from_explanation(data):
     """Pull a clean one-line summary out of a worker's ollama `explanation`.
 
-    Both fid/ghidriff and bind_se already pipe their result through ollama and
-    store a markdown `explanation` beginning with a "Summary of Functionality"
-    section. Reuse that (no new LLM call) so the results table shows readable
-    text instead of raw SMT2. Falls back to the identity/first line.
+    A worker that runs its result through an LLM stores a markdown
+    `explanation` beginning with a "Summary of Functionality" section. Reuse
+    that when present (no new LLM call) so the results table shows readable text
+    instead of a raw expression. Falls back to the identity/first line.
     """
     if not isinstance(data, dict):
         return str(data)[:200] if data is not None else ""
@@ -809,7 +880,7 @@ def dashboard():
                     <div style="margin-top:1rem;">
                         <label style="font-size:0.7rem; color:var(--muted); text-transform:uppercase; letter-spacing:0.05em;">Reference Binary <span style="text-transform:none; color:var(--muted)">(server-selected)</span></label>
                         <select id="refsel" onchange="onRefSelChange(this)" style="width:100%; margin-top:0.3rem; padding:0.5rem; background:#0b0f1a; color:var(--text); border:1px solid var(--border); border-radius:8px; font-size:0.8rem;">
-                            <option value="">Baked default (arducopter)</option>
+                            <option value="">Plugin default</option>
                         </select>
                         <input type="file" id="ref" style="display:none" onchange="onCustomRef(this)">
                         <div id="refl" style="font-size:0.62rem; color:var(--muted); margin-top:0.25rem;"></div>
@@ -878,7 +949,7 @@ def dashboard():
                     const res = await fetch('/api/v1/references?target=' + encodeURIComponent(target||''));
                     const d = await res.json();
                     const sel = document.getElementById('refsel');
-                    let html = '<option value="">Baked default (arducopter)</option>';
+                    let html = '<option value="">Plugin default</option>';
                     (d.references||[]).forEach(n => { html += `<option value="${n}">${n}</option>`; });
                     html += '<option value="__custom__">Upload custom file…</option>';
                     sel.innerHTML = html;
@@ -1062,6 +1133,15 @@ def dashboard():
                     });
                 } catch (e) { cyContainer.innerHTML = `<div style="color:var(--danger); padding:2rem;">Error: ${e.message}</div>`; }
             }
+            // Deterministic colour per backend name. The dashboard must not know
+            // any tool's name, so derive the hue from the string itself: the same
+            // backend always gets the same colour, and a newly installed plugin
+            // gets a distinct one for free.
+            function backendColor(backend) {
+                let h = 0;
+                for (let i = 0; i < (backend||'').length; i++) h = ((h << 5) - h + backend.charCodeAt(i)) | 0;
+                return `hsl(${Math.abs(h) % 360}, 65%, 55%)`;
+            }
             function visualizeBoundaries(data) {
                 document.getElementById('modal-title').innerText='Function Boundary Map';
                 document.getElementById('modal-content').style.display='none'; document.getElementById('cy-container').style.display='none';
@@ -1075,7 +1155,7 @@ def dashboard():
                     const func = data[hex(addr)]; const top = func.hypotheses[0]; const meta = top.data;
                     const left = ((addr - min) / range) * viewWidth; const width = (meta.size / range) * viewWidth;
                     const block = document.createElement('div'); block.className = 'mem-block'; block.style.left = `${left}px`; block.style.width = `${Math.max(width, 2)}px`;
-                    block.style.background = top.backend.includes('angr') ? '#3b82f6' : '#10b981';
+                    block.style.background = backendColor(top.backend);
                     block.innerText = meta.name_hint || hex(addr); block.title = `${hex(addr)} - ${meta.end}`;
                     container.appendChild(block);
                     const label = document.createElement('div'); label.className = 'mem-label'; label.style.left = `${left}px`; label.innerText = hex(addr);
@@ -1217,7 +1297,7 @@ class XbinOrchestratorServicer(orchestrator_pb2_grpc.OrchestratorServiceServicer
     def PostResult(self, request, context):
         cat = request.analysis_type.strip()
         bb_key = f"xbin:bb:{cat}:{request.item_key}"
-        weight = BACKEND_WEIGHTS.get(request.backend_name, 0.50)
+        weight = BACKEND_WEIGHTS.get(request.backend_name, DEFAULT_WEIGHT)
         timestamp = time.strftime("%H:%M:%S")
         audit_key = f"xbin:bb_logs:{cat}"
         
@@ -1400,6 +1480,22 @@ def main():
             # Infer category from parent directory if not provided
             category = os.path.basename(os.path.dirname(os.path.abspath(path)))
         EXPLICIT_PLUGINS.append((os.path.abspath(path), category))
+
+    # Load consensus weights from the plugin manifests now that every plugin
+    # dir (in-tree and out-of-tree) is known.
+    refresh_backend_weights()
+
+    # Refuse to start if another orchestrator already holds our ports. The next
+    # two lines are destructive -- cleanup_stale_plugins() removes every
+    # xbin-worker-* container and flushdb() wipes the blackboard -- and they run
+    # before the ports are bound. Without this check a second launch (a stray
+    # `pytest`, a forgotten second terminal) destroys the running instance's
+    # fleet and results, then dies on the port bind having explained nothing.
+    if _port_in_use(REST_PORT) or _port_in_use(_grpc_port_number()):
+        print(f"[x] An orchestrator is already listening on :{REST_PORT}/:{_grpc_port_number()}.\n"
+              f"    Refusing to start: continuing would flush its blackboard and remove its workers.\n"
+              f"    Stop it first, or point this one elsewhere.", file=sys.stderr)
+        sys.exit(1)
 
     ensure_redis(); cleanup_stale_plugins(); r.flushdb()
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=10))

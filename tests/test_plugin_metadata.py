@@ -1,70 +1,126 @@
-"""Static guard: plugin decorator metadata must not drift from the categories /
-backend weights the consensus engine relies on.
+"""Static guard: a plugin's three descriptions of itself must agree.
 
-Imports each of the five worker modules by path (their Morpheus imports are
-deferred inside on_new_binary/prepare_config, so import works without the heavy
-bind:latest stack or the submodule) and inspects the Worker the @xbin.plugin
-decorator created.
+Every in-tree plugin describes itself in three places -- the directory it sits
+in, the `@xbin.plugin(...)` decorator in its worker, and its `xbin-plugin.toml`
+manifest. The orchestrator reads all three (manifest > decorator > directory),
+so a disagreement between them is a silently-wrong deployment: results get
+scored under one backend name and displayed under another.
+
+Rather than restating the plugin roster here -- which made this file a second
+place to update on every plugin change -- the roster is discovered from the
+manifests, and the assertions check the three sources against each other.
+
+Worker modules import cleanly without their heavy analysis stacks: every such
+import is deferred inside on_new_binary/prepare_config. Base-image bundles under
+plugins/_bases/ are on sys.path so `import bind_helpers` and friends resolve.
 """
 import importlib.util
 import os
+import sys
 
 import pytest
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 PLUGINS = os.path.join(_REPO_ROOT, "plugins")
+BASES = os.path.join(PLUGINS, "_bases")
 
-# Backend names that carry a weight in main.py BACKEND_WEIGHTS (unknown -> 0.5).
-WEIGHTED_BACKENDS = {
-    "fid", "ghidriff", "bind_se", "symbolic_regression", "pysindy", "bind_arbiter",
-    "angr_cfg", "radare_cfg", "angr_boundaries", "radare_boundaries", "binja",
-    "boundary_ranker", "boundary_validator", "flirt_matcher"
-}
+sys.path.insert(0, os.path.join(_REPO_ROOT, "src", "xbin_orchestrator"))
+from plugin_manifest import (DEFAULT_WEIGHT, MANIFEST_NAME,  # noqa: E402
+                             iter_plugin_dirs, read_manifest)
 
-# path -> (name, category, is_ranker, is_validator)
-EXPECTED = {
-    "signature_matching/fid/fid_worker.py": ("fid", "signature_matching", False, False),
-    "signature_matching/ghidriff/ghidriff_worker.py": ("ghidriff", "signature_matching", False, False),
-    "signature_matching/bind_arbiter/arbiter_worker.py": ("bind_arbiter", "signature_matching", True, False),
-    "equation_recovery/bind_se/bind_se_worker.py": ("bind_se", "equation_recovery", False, False),
-    "equation_recovery/symbolic_regression/sr_worker.py": ("symbolic_regression", "equation_recovery", False, False),
-    "equation_recovery/pysindy/pysindy_worker.py": ("pysindy", "equation_recovery", False, False),
-    "cfg_generation/angr/angr_worker.py": ("angr_cfg", "cfg_generation", False, False),
-    "cfg_generation/radare/radare_worker.py": ("radare_cfg", "cfg_generation", False, False),
-    "function_boundary/angr/angr_boundary_worker.py": ("angr_boundaries", "function_boundary", False, False),
-    "function_boundary/radare/radare_boundary_worker.py": ("radare_boundaries", "function_boundary", False, False),
-    "function_boundary/binja/binja_boundary_worker.py": ("binja", "function_boundary", False, False),
-    "function_boundary/boundary_ranker/boundary_ranker.py": ("boundary_ranker", "function_boundary", True, False),
-    "function_boundary/boundary_validator/boundary_validator.py": ("boundary_validator", "function_boundary", False, True),
-    "symbol_matching/flirt/flirt_worker.py": ("flirt_matcher", "symbol_matching", False, False),
-}
+# Shared helper modules that base bundles bake into their images live beside the
+# build scripts, not in the SDK -- put them on sys.path so a worker that imports
+# one can still be loaded here without Docker.
+if os.path.isdir(BASES):
+    for _b in sorted(os.listdir(BASES)):
+        _p = os.path.join(BASES, _b)
+        if os.path.isdir(_p):
+            sys.path.insert(0, _p)
 
 
-def _load_worker(rel_path, mod_name):
+def _worker_files(plugin_dir):
+    return sorted(f for f in os.listdir(plugin_dir)
+                  if f.endswith(".py") and "@xbin.plugin" in
+                  open(os.path.join(plugin_dir, f), encoding="utf-8", errors="ignore").read())
+
+
+def _discover():
+    """(plugin_dir, manifest, worker_file) for every in-tree plugin."""
+    found = []
+    for root in sorted(iter_plugin_dirs([PLUGINS])):
+        manifest = read_manifest(root)
+        workers = _worker_files(root)
+        found.append((root, manifest, workers[0] if workers else None))
+    return found
+
+
+DISCOVERED = _discover()
+IDS = [os.path.relpath(d, PLUGINS) for d, _m, _w in DISCOVERED]
+
+
+def _load_worker(plugin_dir, worker_file, mod_name):
     import xbin.sdk as sdk
-    spec = importlib.util.spec_from_file_location(mod_name, os.path.join(PLUGINS, rel_path))
+    sdk._current_worker = None
+    spec = importlib.util.spec_from_file_location(mod_name, os.path.join(plugin_dir, worker_file))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)  # runs @xbin.plugin(...) -> sets sdk._current_worker
     return sdk._current_worker
 
 
-@pytest.mark.parametrize("rel_path,expected", list(EXPECTED.items()))
-def test_plugin_metadata(rel_path, expected):
-    name, category, is_ranker, is_validator = expected
-    w = _load_worker(rel_path, f"wk_{name}")
-    assert w is not None, f"{rel_path} did not register a worker"
-    assert w.name == name
-    assert w.category == category
-    assert bool(w.is_ranker) == is_ranker
-    assert bool(w.is_validator) == is_validator
-    assert w.name in WEIGHTED_BACKENDS, f"{w.name} has no BACKEND_WEIGHTS entry (would fall back to 0.5)"
-    assert w.display_name, "display_name should be set on the plugin decorator"
+def test_some_plugins_discovered():
+    assert DISCOVERED, "no plugins discovered under plugins/ -- discovery itself is broken"
 
 
-def test_registered_rankers():
-    rankers = []
-    for rel_path, (name, *_rest) in EXPECTED.items():
-        w = _load_worker(rel_path, f"chk_{name}")
-        if w.is_ranker:
-            rankers.append(w.name)
-    assert set(rankers) == {"bind_arbiter", "boundary_ranker"}, f"unexpected rankers: {rankers}"
+@pytest.mark.parametrize("plugin_dir,manifest,worker_file", DISCOVERED, ids=IDS)
+def test_every_plugin_has_a_manifest(plugin_dir, manifest, worker_file):
+    assert manifest, (
+        f"{os.path.relpath(plugin_dir, _REPO_ROOT)} has no readable {MANIFEST_NAME}. "
+        "Without one the plugin falls back to the default consensus weight "
+        f"({DEFAULT_WEIGHT}) and belongs to no e2e tier."
+    )
+    assert manifest.get("name"), f"{MANIFEST_NAME} must declare `name`"
+    assert manifest.get("category"), f"{MANIFEST_NAME} must declare `category`"
+
+
+@pytest.mark.parametrize("plugin_dir,manifest,worker_file", DISCOVERED, ids=IDS)
+def test_manifest_matches_decorator(plugin_dir, manifest, worker_file):
+    assert worker_file, f"{plugin_dir} has a Dockerfile but no @xbin.plugin worker"
+    w = _load_worker(plugin_dir, worker_file, f"wk_{manifest.get('name', 'x')}")
+    assert w is not None, f"{worker_file} did not register a worker"
+    assert w.name == manifest["name"], (
+        f"decorator name={w.name!r} but {MANIFEST_NAME} says {manifest['name']!r}")
+    assert w.category == manifest["category"], (
+        f"decorator category={w.category!r} but {MANIFEST_NAME} says {manifest['category']!r}")
+
+
+@pytest.mark.parametrize("plugin_dir,manifest,worker_file", DISCOVERED, ids=IDS)
+def test_manifest_weight_is_sane(plugin_dir, manifest, worker_file):
+    weight = manifest.get("weight")
+    assert weight is not None, (
+        f"{MANIFEST_NAME} declares no `weight`; the backend would silently score "
+        f"at the {DEFAULT_WEIGHT} fallback")
+    assert 0.0 <= float(weight) <= 1.0, f"weight {weight} outside [0, 1]"
+
+
+@pytest.mark.parametrize("plugin_dir,manifest,worker_file", DISCOVERED, ids=IDS)
+def test_declared_mounts_are_well_formed(plugin_dir, manifest, worker_file):
+    """A mount the core silently drops is worse than one that fails loudly: the
+    plugin starts, loses its cache every restart, and nothing says why."""
+    from plugin_manifest import manifest_mounts
+    declared = manifest.get("mounts", []) or []
+    accepted = list(manifest_mounts(manifest, "/tmp/cache"))
+    assert len(accepted) == len(declared), (
+        f"{len(declared) - len(accepted)} of {len(declared)} [[mounts]] were rejected -- "
+        "`cache` must be a plain directory name and `target` an absolute path")
+
+
+def test_no_duplicate_backend_names():
+    """Two plugins sharing a backend name collide in BACKEND_WEIGHTS and in the
+    blackboard's per-backend accounting."""
+    seen = {}
+    for plugin_dir, manifest, _w in DISCOVERED:
+        name = manifest.get("name")
+        if not name:
+            continue
+        assert name not in seen, f"backend name {name!r} claimed by both {seen[name]} and {plugin_dir}"
+        seen[name] = plugin_dir

@@ -145,6 +145,8 @@ class XbinClient:
                     display_name=p.get("display_name", p["name"]),
                     description=p.get("description", ""),
                     error=p.get("error"),
+                    weight=p.get("weight", 0.5),
+                    tiers=list(p.get("tiers", [])),
                 )
             )
         return plugins

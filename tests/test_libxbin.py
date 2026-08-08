@@ -1,8 +1,14 @@
 import os
+import sys
+
 import pytest
 import libxbin
 from libxbin.exceptions import XbinConnectionError, AnalysisTimeoutError, APIError
 from libxbin.models import PluginInfo, BlackboardItem, FunctionBoundary, ConsensusCFG
+
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "tests"))
+from test_rest_api import _installed_manifests  # noqa: E402  (shared discovery helper)
 
 def test_client_init():
     client = libxbin.connect("http://localhost:8000")
@@ -22,21 +28,27 @@ def test_client_health_and_ready(orchestrator_server, rest_base, clean_redis):
     assert h.get("orchestrator") == "HEALTHY"
 
 def test_client_list_plugins(orchestrator_server, rest_base, clean_redis):
+    """libxbin surfaces whatever plugins are installed, including the manifest
+    fields (weight/tiers) the orchestrator derives. The expectation comes from
+    the manifests, not a copy of the roster."""
     client = libxbin.connect(rest_base)
     plugins = client.list_plugins()
-    assert len(plugins) >= 14
-    
-    plugin_names = {p.name for p in plugins}
-    expected_names = {
-        "fid", "ghidriff", "bind_arbiter", "bind_se", "symbolic_regression",
-        "pysindy", "angr_cfg", "radare_cfg", "angr_boundaries", "radare_boundaries",
-        "binja", "boundary_ranker", "boundary_validator", "flirt_matcher"
-    }
-    assert expected_names.issubset(plugin_names)
-    
-    arbiter = next(p for p in plugins if p.name == "bind_arbiter")
-    assert arbiter.is_ranker is True
-    assert arbiter.category == "signature_matching"
+
+    manifests = _installed_manifests()
+    assert manifests, "no plugin manifests found"
+    assert len(plugins) >= len(manifests)
+
+    by_name = {p.name: p for p in plugins}
+    for m in manifests.values():
+        assert m["name"] in by_name, f"{m['name']} missing from libxbin.list_plugins()"
+        p = by_name[m["name"]]
+        assert p.category == m["category"]
+        assert p.is_ranker == m["is_ranker"]
+        assert p.is_validator == m["is_validator"]
+        # The fields added alongside the manifest must survive the round-trip
+        # through the REST API into the dataclass.
+        assert p.weight == pytest.approx(m["weight"])
+        assert isinstance(p.tiers, list)
 
 def test_client_upload_and_job(orchestrator_server, rest_base, clean_redis, tmp_path):
     client = libxbin.connect(rest_base)

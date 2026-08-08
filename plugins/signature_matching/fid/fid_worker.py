@@ -9,7 +9,7 @@ address, competing with ghidriff / bind_se).
 import os
 
 import xbin
-from xbin.bind_helpers import CAT_SIGNATURE, prepare_config
+from bind_helpers import CAT_SIGNATURE, prepare_config
 
 
 @xbin.plugin(

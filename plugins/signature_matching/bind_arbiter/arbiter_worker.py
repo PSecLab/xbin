@@ -17,7 +17,7 @@ import os
 
 import xbin
 import xbin.sdk as _sdk
-from xbin.bind_helpers import CAT_SIGNATURE, CAT_EQUATION
+from bind_helpers import CAT_SIGNATURE, CAT_EQUATION
 
 _LLM_MODE = os.environ.get("BIND_ARBITER_LLM_MODE", "on-conflict")  # always | on-conflict | never
 
