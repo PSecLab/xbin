@@ -169,7 +169,13 @@ Morpheus's static FP-function detection is weaker than pysindy's, which reads th
 (symbols + debug_info). This is architectural: **pysindy is the ELF-native recoverer; the
 Morpheus tools are strongest on raw `.bin` firmware** (e.g. betaflight, where fid/ghidriff/bind_se
 all work). Ghidra's BinaryLoader forbids feeding it the ELF directly, so raw conversion is the
-correct bridge; closing the SR/bind_se fidelity gap on ELFs would require ELF-native analysis
+correct bridge. `symbolic_regression`'s specific failure mode on an ELF upload is now pinned
+down: its Binary Ninja pre-analysis step is handed `<upload>.fw.bin.bndb`, a database for the
+*derived* raw image, but only `<upload>.bndb` (for the ELF itself) is ever produced. Binary
+Ninja then raises `Unable to create new BinaryView`, `pre_analysis_single_func_non_struct.py`
+exits 1, and the worker logs `[-] Pre-analysis failed. Aborting for this function.` per
+candidate and posts 0. It is a missing artifact, not a crash — the worker stays healthy and
+finishes cleanly. Closing the SR/bind_se fidelity gap on ELFs would require ELF-native analysis
 in Morpheus (a larger upstream change).
 
 
