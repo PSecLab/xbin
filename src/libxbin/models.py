@@ -13,6 +13,12 @@ class PluginInfo:
     display_name: str
     description: str
     error: Optional[str] = None
+    # Declared in the plugin's xbin-plugin.toml. `weight` is the multiplier
+    # applied to this backend's raw confidence when scoring a hypothesis
+    # (0.5 when the plugin declares nothing); `tiers` are the end-to-end test
+    # tiers the plugin belongs to.
+    weight: float = 0.5
+    tiers: List[str] = field(default_factory=list)
 
 @dataclass
 class VerificationStamp:

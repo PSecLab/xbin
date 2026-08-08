@@ -1,49 +1,60 @@
-# xbin (BINDonly) developer / test targets.
+# xbin developer / test targets.
 # Run from the repo root. See docs/e2e_testing.md for the full walkthrough.
+#
+# Nothing here names a plugin or a tier: base images, staged fixtures and e2e
+# tiers all come from what is installed under plugins/.
 
-RYEPY ?= /home/akul/.rye/py/cpython@3.12.9/bin/python3
-VENV  := .venv
-PY    := $(VENV)/bin/python
+# Interpreter used to create .venv. Override if your python3 is >= 3.11:
+#   make setup PYTHON=/usr/bin/python3.12
+PYTHON ?= python3
+VENV   := .venv
+PY     := $(VENV)/bin/python
 
-.PHONY: help setup preflight test stage rebuild-base e2e-smoke e2e-full e2e-heavy clean
+# Every shared base-image bundle and every plugin-provided fixture stager.
+# $(sort) dedupes: plugins/*/*/ already covers plugins/_bases/<bundle>/, so
+# without it a bundle's stage.sh would be run twice.
+BASES   := $(sort $(wildcard plugins/_bases/*/build.sh))
+STAGERS := $(sort $(wildcard plugins/*/*/stage.sh) $(wildcard plugins/_bases/*/stage.sh))
+
+.PHONY: help setup preflight test tiers bases stage e2e clean
 
 help:
 	@echo "targets:"
-	@echo "  setup        create .venv (rye cpython) + pip install -e . pytest"
-	@echo "  preflight    check docker/redis/ollama/bind:latest/deps (smoke tier)"
+	@echo "  setup        create .venv + pip install -e . pytest"
+	@echo "  preflight    check readiness (core + plugin-contributed checks)"
 	@echo "  test         fast Docker-free pytest lane"
-	@echo "  stage        copy gs3.bin into uploads/ (scripts/fetch_test_binaries.sh)"
-	@echo "  rebuild-base rebuild bind:latest with QEMU (kills the outdated instance)"
-	@echo "  e2e-smoke    full-stack: fid + ghidriff"
-	@echo "  e2e-full     + bind_se + bind_arbiter (needs ollama)"
-	@echo "  e2e-heavy    + symbolic_regression (needs QEMU in bind:latest)"
+	@echo "  tiers        list the e2e tiers the installed plugins define"
+	@echo "  bases        build every plugins/_bases/*/build.sh base image"
+	@echo "  stage        run every plugin's stage.sh (test fixtures -> uploads/)"
+	@echo "  e2e          full-stack run; TIER=<name> (default: smoke)"
 	@echo "  clean        remove xbin-worker-* containers"
+	@echo ""
+	@echo "  base images available: $(if $(BASES),$(BASES),none)"
 
 setup:
-	$(RYEPY) -m venv $(VENV)
+	$(PYTHON) -m venv $(VENV)
 	$(PY) -m pip install --upgrade pip
 	$(PY) -m pip install -e . pytest
 
 preflight:
-	scripts/preflight.sh --tier smoke
+	scripts/preflight.sh --tier $(or $(TIER),smoke)
 
 test:
 	$(PY) -m pytest
 
+tiers:
+	@$(PY) scripts/e2e_driver.py --list-tiers
+
+bases:
+	@if [ -z "$(BASES)" ]; then echo "no plugins/_bases/*/build.sh found"; fi
+	@for b in $(BASES); do echo "[*] $$b"; "$$b" || exit 1; done
+
 stage:
-	scripts/fetch_test_binaries.sh
+	@if [ -z "$(STAGERS)" ]; then echo "no plugin stage.sh found"; fi
+	@for s in $(STAGERS); do echo "[*] $$s"; "$$s" || exit 1; done
 
-rebuild-base:
-	scripts/rebuild_bind_base.sh
-
-e2e-smoke:
-	scripts/e2e.sh smoke
-
-e2e-full:
-	scripts/e2e.sh full
-
-e2e-heavy:
-	scripts/e2e.sh heavy
+e2e:
+	scripts/e2e.sh $(or $(TIER),smoke)
 
 clean:
 	-docker rm -f $$(docker ps -aq --filter name=xbin-worker-) 2>/dev/null || true

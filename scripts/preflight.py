@@ -5,38 +5,41 @@ Stdlib-only so it runs on a bare `python3` BEFORE any venv exists (checking for
 the venv/deps is one of its jobs). Prints an aligned PASS/FAIL/WARN table and
 exits nonzero if any *required* check for the chosen tier fails.
 
-  smoke  fid + ghidriff            -> Docker + bind:latest + Redis + a test binary
-  full   + bind_se + arbiter       -> + ollama (qwen2.5-coder:7b)
-  heavy  + symbolic_regression     -> + QEMU/FastDyn inside bind:latest
+The core checks here are the ones that hold for any xbin deployment: docker, a
+reachable redis, free (or held) orchestrator ports, and the python deps.
+
+Anything tool-specific -- "is this base image built", "is that model pulled",
+"is the emulator inside the image" -- belongs to the plugin that needs it. Drop
+a `preflight_checks.py` next to a plugin (or in a `plugins/_bases/*/` bundle)
+exposing:
+
+    def checks(tier: str, ctx) -> list[Check]
+
+and this runner discovers and calls it. `ctx` hands over the helpers
+(`ctx.run`, `ctx.port_open`, `ctx.Check`, `ctx.PASS/FAIL/WARN`, `ctx.repo_root`)
+so a plugin check needs no imports of its own. Each check carries its own
+remediation string, so the fix travels with the tool instead of living here.
 
 Usage:
-  python3 scripts/preflight.py [--tier smoke|full|heavy] [--attach]
+  python3 scripts/preflight.py [--tier TIER] [--attach]
 """
 from __future__ import annotations
 
 import argparse
 import importlib.util
-import json
 import os
 import shutil
 import socket
 import subprocess
 import sys
-import urllib.request
+import traceback
 
 REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+PLUGINS_DIR = os.environ.get("XBIN_PLUGINS_DIR") or os.path.join(REPO_ROOT, "plugins")
+PLUGIN_CHECKS_FILE = "preflight_checks.py"
 
 GRPC_PORT = 50051
 REST_PORT = 8000
-OLLAMA_URL = "http://127.0.0.1:11434/api/tags"
-OLLAMA_MODEL = "qwen2.5-coder:7b"
-BIND_IMAGE = "bind:latest"
-QEMU_BIN = "/home/bind/Morpheus/qemu/build/qemu-system-arm"
-FASTDYN_SO = "/home/bind/Morpheus/qemu/build/tests/tcg/plugins/libvirtual.so"
-DEFAULT_BINARY = os.environ.get(
-    "XBIN_TEST_BINARY",
-    os.path.join(REPO_ROOT, "submodules", "Morpheus", "example_config", "gs3.bin"),
-)
 
 PASS, FAIL, WARN = "PASS", "FAIL", "WARN"
 
@@ -60,32 +63,23 @@ def _port_open(port, host="localhost"):
         return s.connect_ex((host, port)) == 0
 
 
+class Context:
+    """Handed to every plugin-provided `checks(tier, ctx)`."""
+    Check = Check
+    PASS, FAIL, WARN = PASS, FAIL, WARN
+    run = staticmethod(_run)
+    port_open = staticmethod(_port_open)
+    repo_root = REPO_ROOT
+
+
+# --------------------------------------------------------------------------
+# Core checks -- true of any xbin deployment, whatever plugins are installed.
+# --------------------------------------------------------------------------
+
 def check_docker():
     rc, out = _run(["docker", "version", "--format", "{{.Server.Version}}"], timeout=15)
     return Check("docker daemon", PASS if rc == 0 else FAIL,
                  out.strip() if rc == 0 else "docker not reachable")
-
-
-def check_bind_image():
-    rc, _ = _run(["docker", "image", "inspect", BIND_IMAGE], timeout=15)
-    return Check(f"{BIND_IMAGE} image", PASS if rc == 0 else FAIL,
-                 "present" if rc == 0 else "missing -> scripts/rebuild_bind_base.sh")
-
-
-def check_qemu_in_base(tier):
-    # Only meaningful (and required) for the heavy tier (symbolic_regression).
-    required = tier == "heavy"
-    rc, _ = _run(["docker", "image", "inspect", BIND_IMAGE], timeout=15)
-    if rc != 0:
-        return Check("QEMU in bind:latest", FAIL if required else WARN,
-                     "base image missing", required=required)
-    rc, out = _run(["docker", "run", "--rm", "--entrypoint", "/bin/bash", BIND_IMAGE, "-lc",
-                    f"test -f '{QEMU_BIN}' && test -f '{FASTDYN_SO}'"], timeout=60)
-    ok = rc == 0
-    return Check("QEMU in bind:latest", PASS if ok else (FAIL if required else WARN),
-                 "qemu-system-arm+libvirtual present" if ok
-                 else "missing -> scripts/rebuild_bind_base.sh (needed for symbolic_regression)",
-                 required=required)
 
 
 def check_redis():
@@ -96,21 +90,6 @@ def check_redis():
         if "PONG" not in out:
             return Check("redis :6379", FAIL, f"ping -> {out.strip()}")
     return Check("redis :6379", PASS, "PONG")
-
-
-def check_ollama(tier):
-    required = tier in ("full", "heavy")
-    try:
-        with urllib.request.urlopen(OLLAMA_URL, timeout=3) as resp:
-            data = json.loads(resp.read().decode())
-        models = [m.get("name", "") for m in data.get("models", [])]
-        ok = any(OLLAMA_MODEL in m for m in models)
-        return Check("ollama + model", PASS if ok else (FAIL if required else WARN),
-                     f"{OLLAMA_MODEL} present" if ok else f"model missing (have: {models})",
-                     required=required)
-    except Exception as e:
-        return Check("ollama + model", FAIL if required else WARN,
-                     f"unreachable ({e}); smoke tier does not need it", required=required)
 
 
 def check_ports(attach):
@@ -131,48 +110,64 @@ def check_python_deps():
                if importlib.util.find_spec(m) is None]
     if not missing:
         return Check("python deps", PASS, f"{sys.executable}")
-    fix = ("/home/akul/.rye/py/cpython@3.12.9/bin/python3 -m venv .venv && "
-           "source .venv/bin/activate && pip install -e . pytest")
-    return Check("python deps", FAIL, f"missing {missing} -> {fix}")
+    return Check("python deps", FAIL, f"missing {missing} -> make setup")
 
 
-def check_test_binary():
-    ok = os.path.exists(DEFAULT_BINARY)
-    return Check("test binary", PASS if ok else WARN,
-                 DEFAULT_BINARY if ok else f"not found: {DEFAULT_BINARY} (run scripts/fetch_test_binaries.sh)",
-                 required=False)
+# --------------------------------------------------------------------------
+# Plugin-contributed checks
+# --------------------------------------------------------------------------
+
+def _load_module(path):
+    spec = importlib.util.spec_from_file_location(
+        "xbin_preflight_" + os.path.basename(os.path.dirname(path)), path)
+    if spec is None or spec.loader is None:
+        return None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
-def check_outdated_instance():
-    # Warn if a container is still running on an outdated (no-QEMU) bind:latest.
-    rc, out = _run(["docker", "ps", "-q", "--filter", f"ancestor={BIND_IMAGE}"], timeout=15)
-    if rc == 0 and out.strip():
-        rc2, _ = _run(["docker", "run", "--rm", "--entrypoint", "/bin/bash", BIND_IMAGE, "-lc",
-                       f"test -f '{QEMU_BIN}'"], timeout=60)
-        if rc2 != 0:
-            return Check("no outdated instance", WARN,
-                         "a container is running on a no-QEMU bind:latest -> rebuild_bind_base.sh kills it",
-                         required=False)
-    return Check("no outdated instance", PASS, "none", required=False)
+def discover_plugin_checks(tier, plugins_dir=PLUGINS_DIR):
+    """Run every `preflight_checks.py` found under the plugins tree.
+
+    A plugin whose check module is broken produces a WARN rather than taking the
+    whole preflight down -- a bad check should not be able to block a run that
+    does not involve that plugin."""
+    results = []
+    if not os.path.isdir(plugins_dir):
+        return results
+    for root, _dirs, files in os.walk(plugins_dir):
+        if PLUGIN_CHECKS_FILE not in files:
+            continue
+        path = os.path.join(root, PLUGIN_CHECKS_FILE)
+        label = os.path.relpath(root, plugins_dir)
+        try:
+            module = _load_module(path)
+            produced = module.checks(tier, Context) if module and hasattr(module, "checks") else []
+            results.extend(c for c in produced if isinstance(c, Check))
+        except Exception as e:
+            traceback.print_exc(file=sys.stderr)
+            results.append(Check(f"{label} checks", WARN,
+                                 f"check module failed to run: {e}", required=False))
+    return results
 
 
 def main():
     ap = argparse.ArgumentParser(description="xbin preflight checker")
-    ap.add_argument("--tier", choices=["smoke", "full", "heavy"], default="smoke")
+    # Tiers are defined by the installed plugins (xbin-plugin.toml `tiers`), so
+    # this is a free-form string rather than a fixed choice list.
+    ap.add_argument("--tier", default="smoke",
+                    help="end-to-end tier to check for (default: smoke)")
     ap.add_argument("--attach", action="store_true")
     args = ap.parse_args()
 
     checks = [
         check_docker(),
-        check_bind_image(),
-        check_qemu_in_base(args.tier),
         check_redis(),
-        check_ollama(args.tier),
         check_ports(args.attach),
         check_python_deps(),
-        check_test_binary(),
-        check_outdated_instance(),
     ]
+    checks.extend(discover_plugin_checks(args.tier))
 
     print(f"\nxbin preflight  (tier={args.tier}{', attach' if args.attach else ''})")
     print("-" * 72)

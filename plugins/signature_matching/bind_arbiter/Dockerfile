@@ -9,7 +9,7 @@ RUN python3 -m pip install --no-cache-dir grpcio redis requests
 COPY --chown=bind:bind src /opt/xbin_sdk
 COPY --chown=bind:bind arbiter_worker.py /home/bind/arbiter_worker.py
 
-ENV PYTHONPATH=/opt/xbin_sdk:/home/bind/Morpheus \
+ENV PYTHONPATH=/opt/xbin_sdk:/opt/xbin_bind:/home/bind/Morpheus \
     MORPHEUS_ROOT=/home/bind/Morpheus \
     XBIN_ORCHESTRATOR=localhost:50051 \
     REDIS_HOST=localhost \

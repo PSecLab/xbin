@@ -10,7 +10,7 @@ and posts each recovered formula to the ``equation_recovery`` blackboard
 import os
 
 import xbin
-from xbin.bind_helpers import CAT_EQUATION, prepare_config, function_universe
+from bind_helpers import CAT_EQUATION, prepare_config, function_universe
 
 
 def _first_line(text):

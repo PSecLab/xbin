@@ -1,18 +1,24 @@
-"""Helpers shared by the four Morpheus/BIND xbin plugins.
+"""Helpers shared by the Morpheus/BIND xbin plugins.
 
-These run *inside* the ``bind:latest`` image (built from the Morpheus submodule
-via ``scripts/build_bind_base.sh``), where the Morpheus tree is on PYTHONPATH and
-``bind_se`` is installed. Every Morpheus import is deferred into a function so
-this module imports fine anywhere -- e.g. when the orchestrator statically scans
-plugin source, or on a dev box without the heavy stack.
+This module belongs to the ``bind:latest`` base image, not to the xbin SDK.
+``./build.sh`` bakes it in at ``/opt/xbin_bind`` and each BIND plugin's
+Dockerfile puts that on ``PYTHONPATH``, so the workers ``import bind_helpers``
+directly. Keeping it here rather than in ``src/xbin/`` is what stops every
+unrelated plugin image from carrying Morpheus code: the orchestrator injects all
+of ``src/`` into every plugin build context, but this bundle reaches only the
+images that are built ``FROM bind:latest``.
 
-The four analysis tools map onto two xbin blackboard categories (tools that
+Every Morpheus import is deferred into a function so this module imports fine
+anywhere -- e.g. when the orchestrator statically scans plugin source, or on a
+dev box without the heavy stack.
+
+The BIND analysis tools map onto two xbin blackboard categories (tools that
 answer the same question compete, like angr+radare both posting a CFG):
 
 * ``signature_matching``  -- "what known function is this": fid, ghidriff
   (and bind_se's identity matches).
 * ``equation_recovery``   -- "what does it compute": bind_se (angr symex + LLM),
-  symbolic_regression (PySR + LLM).
+  symbolic_regression (PySR + LLM), pysindy (sparse regression).
 """
 
 import os

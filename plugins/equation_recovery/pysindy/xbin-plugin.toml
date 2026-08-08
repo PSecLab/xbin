@@ -1,0 +1,12 @@
+name     = "pysindy"
+category = "equation_recovery"
+# Binary Ninja structure analysis + numpy STLSQ sparse regression.
+weight   = 0.85
+# Deliberately in no e2e tier: pysindy needs a non-stripped Cortex-M ELF,
+# which the tiers' raw-.bin firmware target is not. Start it by hand.
+# Collects I/O pairs by running the firmware under QEMU/FastDyn.
+shm_size = "1g"
+
+[[mounts]]
+cache  = "job_outputs"
+target = "/home/bind/Morpheus/job_outputs"

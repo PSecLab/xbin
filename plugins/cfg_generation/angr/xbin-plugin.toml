@@ -1,0 +1,3 @@
+name     = "angr_cfg"
+category = "cfg_generation"
+weight   = 0.90

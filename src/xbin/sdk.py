@@ -111,8 +111,8 @@ class Worker:
 
     def post_result(self, item_key: str, data: Any, confidence: float, category: Optional[str] = None):
         # `category` defaults to the worker's own category, but a worker may post
-        # to a different blackboard (e.g. bind_se posts semantics to
-        # equation_recovery and an identity match to signature_matching).
+        # to a different blackboard -- a tool that answers two questions at once
+        # can contribute to both without registering twice.
         target_cat = category or self.category
         try:
             self._stub.PostResult(orchestrator_pb2.PostResultRequest(

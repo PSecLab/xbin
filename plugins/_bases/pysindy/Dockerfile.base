@@ -1,0 +1,37 @@
+# `pysindy:latest` = `bind:latest` + the pysyndy submodule's recovery code.
+#
+# Named Dockerfile.base, not Dockerfile, so plugin discovery (which walks for a
+# file named exactly `Dockerfile`) never mistakes this bundle for a plugin.
+#
+# Built by ./build.sh, which stages the submodule's tracked files at the pinned
+# commit into the context as pysyndy/. Everything heavy -- Binary Ninja, Ghidra,
+# the QEMU fork, PySR -- is inherited from bind:latest, so this is a thin layer
+# and needs no license of its own.
+ARG BASE=bind:latest
+FROM ${BASE}
+USER root
+
+COPY --chown=bind:bind pysyndy /home/bind/pysyndy
+
+ENV PYSINDY_ROOT=/home/bind/pysyndy \
+    PYTHONPATH=/home/bind/Morpheus:/home/bind/pysyndy:/home/bind/pysyndy/binja_scripts
+
+# pysyndy's core needs only numpy/BN (both in bind:latest); add a tomli fallback
+# for its config parsing on Python < 3.11.
+RUN python3 -m pip install --no-cache-dir tomli || true
+
+# pysyndy's automated collection (xbin_api._cfg_for) hard-codes its QEMU/FastDyn
+# at <pysyndy>/qemu/build. pysyndy's qemu source is untracked, but bind:latest
+# already ships the same BIND QEMU fork + FastDyn plugin (from Morpheus) -- point
+# pysyndy's expected paths at those so the dynamic run works without a rebuild.
+# If a future pysyndy change diverges the QEMU ABI, build pysyndy's own QEMU here
+# instead of symlinking.
+RUN mkdir -p /home/bind/pysyndy/qemu/build/tests/tcg/plugins && \
+    ln -sf /home/bind/Morpheus/qemu/build/qemu-system-arm \
+           /home/bind/pysyndy/qemu/build/qemu-system-arm && \
+    ln -sf /home/bind/Morpheus/qemu/build/tests/tcg/plugins/libvirtual.so \
+           /home/bind/pysyndy/qemu/build/tests/tcg/plugins/libvirtual.so && \
+    chown -R bind:bind /home/bind/pysyndy/qemu
+
+USER bind
+WORKDIR /home/bind/Morpheus

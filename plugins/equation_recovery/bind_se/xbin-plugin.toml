@@ -1,0 +1,18 @@
+name     = "bind_se"
+category = "equation_recovery"
+# angr symbolic execution + LLM explanation. Lower than the signature matchers:
+# a recovered expression is a weaker claim than a matched identity.
+weight   = 0.85
+tiers    = ["full", "heavy"]
+# angr symbolic execution runs up to a 2h cap; the tier timeout is the max over
+# its member plugins.
+e2e_timeout = 9000
+
+[[mounts]]
+cache  = "job_outputs"
+target = "/home/bind/Morpheus/job_outputs"
+
+# Recovered signature DB: the expensive part of a bind_se run, worth keeping.
+[[mounts]]
+cache  = "se_sigdb"
+target = "/home/bind/Morpheus/signature_matching/signatures/se"

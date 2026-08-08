@@ -13,7 +13,14 @@ class BoundaryRanker:
     def on_update(self, category, item_key, new_hypothesis, top_hypothesis):
         if category != "function_boundary":
             return
-            
+
+        # Unlike a verifier, this ranker *wants* verification-triggered updates:
+        # it boosts a hypothesis by its PASS-stamp count. So do not skip them --
+        # just tolerate the fields they omit. `new_hypothesis` is None on those,
+        # and `top_hypothesis` is None for an item with no hypotheses.
+        if not top_hypothesis:
+            return
+
         verifications = top_hypothesis.get('verifications', [])
         pass_stamps = [v for v in verifications if v.get('verdict') == 'PASS']
         v_count = len(pass_stamps)

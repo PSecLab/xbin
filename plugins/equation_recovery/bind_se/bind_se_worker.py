@@ -39,7 +39,7 @@ import sys as _sys
 import tempfile as _tempfile
 
 import xbin
-from xbin.bind_helpers import CAT_EQUATION, CAT_SIGNATURE, prepare_config
+from bind_helpers import CAT_EQUATION, CAT_SIGNATURE, prepare_config
 
 _FUNC_TIMEOUT = int(os.environ.get("BIND_SE_FUNC_TIMEOUT", "90"))
 _FUNC_MEM_GB = float(os.environ.get("BIND_SE_FUNC_MEM_GB", "24"))
@@ -64,7 +64,7 @@ def _function_universe_isolated(config_path):
     fd, out_path = _tempfile.mkstemp(suffix=".json", prefix="xbin_universe_")
     os.close(fd)
     code = (
-        "import json, sys; from xbin.bind_helpers import function_universe; "
+        "import json, sys; from bind_helpers import function_universe; "
         "open(sys.argv[2], 'w').write(json.dumps(function_universe(sys.argv[1])))"
     )
     try:

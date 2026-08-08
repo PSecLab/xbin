@@ -1,5 +1,13 @@
-# CFG Generation Plugins
+# `cfg_generation`
 
-Plugins in this directory generate Control Flow Graphs (CFG) for uploaded binary targets.
-- **angr_cfg**: Generates a fast CFG using angr.
-- **radare_cfg**: Generates a CFG using radare2 (r2pipe).
+Plugins in this category answer **"what is this binary's control flow?"** by
+generating a Control Flow Graph for the uploaded target. Tools here compete: they
+post to the same blackboard for the same item key and the orchestrator scores
+them against each other.
+
+By convention `result_data` is a graph with `nodes` and `edges` lists.
+
+| Plugin | Backend | Weight |
+|---|---|---|
+| [`angr/`](angr/README.md) | angr | 0.90 |
+| [`radare/`](radare/README.md) | radare2 (r2pipe) | 0.85 |

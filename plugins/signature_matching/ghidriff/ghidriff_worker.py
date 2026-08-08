@@ -9,7 +9,7 @@ to the ``signature_matching`` blackboard.
 import os
 
 import xbin
-from xbin.bind_helpers import CAT_SIGNATURE, prepare_config
+from bind_helpers import CAT_SIGNATURE, prepare_config
 
 
 @xbin.plugin(

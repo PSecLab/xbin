@@ -1,0 +1,4 @@
+name     = "boundary_validator"
+category = "function_boundary"
+# Verifier for function_boundary: attaches stamps, never changes scores.
+weight   = 1.0

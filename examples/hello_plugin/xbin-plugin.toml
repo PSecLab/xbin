@@ -1,0 +1,5 @@
+name     = "hello_matcher"
+category = "symbol_matching"
+# Multiplier applied to this backend's raw confidence when scoring a hypothesis.
+# Omit it and the backend silently scores at the 0.5 fallback -- always declare it.
+weight   = 0.5

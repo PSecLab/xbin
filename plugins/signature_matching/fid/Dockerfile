@@ -1,5 +1,5 @@
 # FID plugin -- thin layer over the self-contained `bind:latest` base image
-# (built from the Morpheus submodule via scripts/build_bind_base.sh). The heavy
+# (built from the Morpheus submodule via plugins/_bases/bind/build.sh). The heavy
 # analysis stack (Ghidra + Binary Ninja + bind_se) lives in the base; here we
 # only add the xbin SDK transport and the worker.
 FROM bind:latest
@@ -12,7 +12,7 @@ RUN python3 -m pip install --no-cache-dir grpcio redis requests
 COPY --chown=bind:bind src /opt/xbin_sdk
 COPY --chown=bind:bind fid_worker.py /home/bind/fid_worker.py
 
-ENV PYTHONPATH=/opt/xbin_sdk:/home/bind/Morpheus \
+ENV PYTHONPATH=/opt/xbin_sdk:/opt/xbin_bind:/home/bind/Morpheus \
     MORPHEUS_ROOT=/home/bind/Morpheus \
     XBIN_ORCHESTRATOR=localhost:50051 \
     REDIS_HOST=localhost \

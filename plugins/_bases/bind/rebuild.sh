@@ -1,24 +1,24 @@
 #!/usr/bin/env bash
 # Rebuild the `bind:latest` base image, adding the QEMU/FastDyn dynamic-analysis
 # stack that `symbolic_regression` needs (the previous image was built without
-# it). This is a guard + verify wrapper around scripts/build_bind_base.sh:
+# it). This is a guard + verify wrapper around this directory's build.sh:
 #
 #   1. If the current bind:latest already has QEMU, do nothing (idempotent).
 #   2. Otherwise KILL the outdated running instance -- any container still on the
 #      old bind:latest (e.g. the leftover `bind_corrupt` scratch container), all
 #      xbin-worker-* containers, and the stale xbin-plugin-* thin-layer images --
 #      so nothing keeps running the outdated code and the old layers can be freed.
-#   3. Rebuild via build_bind_base.sh (sources the Morpheus submodule, which must
+#   3. Rebuild via ./build.sh (sources the Morpheus submodule, which must
 #      be populated on `integration`; the Dockerfile clones+builds the QEMU fork).
 #   4. Prune the now-dangling old base and VERIFY qemu-system-arm + libvirtual.so
 #      are present in the new image (fail loudly otherwise).
 #
-# Usage: scripts/rebuild_bind_base.sh [--force]
+# Usage: plugins/_bases/bind/rebuild.sh [--force]
 #   --force  rebuild even if the current image already has QEMU.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="$(cd "$HERE/.." && pwd)"
+REPO_ROOT="$(cd "$HERE/../../.." && pwd)"
 IMAGE="${BIND_IMAGE:-bind:latest}"
 
 QEMU_BIN="/home/bind/Morpheus/qemu/build/qemu-system-arm"
@@ -33,7 +33,7 @@ has_qemu() {
     "test -f '$QEMU_BIN' && test -f '$FASTDYN_SO'" >/dev/null 2>&1
 }
 
-echo "[*] rebuild_bind_base: target image = $IMAGE"
+echo "[*] rebuild bind base: target image = $IMAGE"
 
 if [[ "$FORCE" -eq 0 ]] && docker image inspect "$IMAGE" >/dev/null 2>&1 && has_qemu "$IMAGE"; then
   echo "[=] $IMAGE already contains QEMU ($QEMU_BIN). Nothing to do."
@@ -73,8 +73,8 @@ if [[ -n "$PLUGIN_IMAGES" ]]; then
 fi
 
 # --- 3. Rebuild via the canonical builder ------------------------------------
-echo "[+] Rebuilding $IMAGE via scripts/build_bind_base.sh (heavy: Ghidra + Binary Ninja + QEMU + PySR)..."
-"$HERE/build_bind_base.sh"
+echo "[+] Rebuilding $IMAGE via ./build.sh (heavy: Ghidra + Binary Ninja + QEMU + PySR)..."
+"$HERE/build.sh"
 
 # --- 4. Prune dangling old base + verify QEMU landed -------------------------
 echo "[+] Pruning dangling images..."

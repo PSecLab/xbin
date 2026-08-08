@@ -1,0 +1,4 @@
+name     = "flirt_matcher"
+category = "symbol_matching"
+# IDA FLIRT signature matching.
+weight   = 0.95

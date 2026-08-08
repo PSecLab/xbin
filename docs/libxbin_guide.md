@@ -42,7 +42,7 @@ if client.is_ready():
 job = client.analyze(
     "firmware.elf",
     goals=["cfg_generation", "function_boundary", "signature_matching"],
-    reference_path="reference_arducopter.elf"  # Optional reference binary
+    reference_path="reference_build.elf"  # Optional reference binary
 )
 
 print(f"Submitted job for {job.filename}")
@@ -81,8 +81,8 @@ for p in plugins:
     print(f"Plugin {p.name} [{p.category}] - {p.status}")
 
 # Start or stop specific plugins
-client.start_plugin("angr_cfg", "cfg_generation")
-client.stop_plugin("radare_cfg", "cfg_generation")
+client.start_plugin("my_cfg_tool", "cfg_generation")
+client.stop_plugin("my_other_cfg_tool", "cfg_generation")
 
 # Start all plugins for a specific category
 client.bulk_start("function_boundary")

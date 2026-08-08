@@ -1,0 +1,3 @@
+name     = "radare_boundaries"
+category = "function_boundary"
+weight   = 0.85

@@ -38,6 +38,11 @@ signatures/*
 # Docker
 .dockerignore
 
+# Plugin build inputs: each names a local Binary Ninja install + license, so the
+# filled-in copy is developer-specific. Only the .example is tracked.
+plugins/_bases/*/build.conf
+plugins/*/*/build.conf
+
 # IDEs
 .vscode/
 .idea/

@@ -1,0 +1,7 @@
+name     = "bind_arbiter"
+category = "signature_matching"
+# Ranker: reconciles competing identifications per function via a local LLM.
+# Rankers set scores outright, so the weight only applies to what it posts.
+weight   = 1.0
+tiers    = ["full", "heavy"]
+e2e_timeout = 1800

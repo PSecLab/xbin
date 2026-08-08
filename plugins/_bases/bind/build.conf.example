@@ -1,0 +1,15 @@
+# Inputs for building the self-contained `bind:latest` base image -- the heavy
+# Binary Ninja + Ghidra + QEMU + PySR stack that the BIND plugins extend.
+#
+# Copy this file to `build.conf` (gitignored) and fill in your own paths; CLI
+# args to build.sh override them. A leading ~ is expanded.
+#
+#   binja dir    : a Binary Ninja install DIRECTORY, or a .zip whose top level
+#                  contains a binaryninja/ folder. Baked into the image.
+#   license path : path to your Binary Ninja license.dat. Baked into the image.
+#
+# Both are baked in, so the resulting image is licensed material -- keep it
+# local and never push it.
+
+binja dir: "/path/to/binaryninja_linux_stable_ultimate.zip"
+license path: "/path/to/license.dat"
