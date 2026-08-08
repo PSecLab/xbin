@@ -13,10 +13,18 @@ class BoundaryValidator:
     def on_update(self, category, item_key, new_hypothesis, top_hypothesis):
         if category != "function_boundary":
             return
-            
+
+        # A verification-triggered update carries a stamp, not a hypothesis, so
+        # `new_hypothesis` is None. There is nothing new to validate -- and the
+        # very first stamp we post would otherwise come straight back to us and
+        # crash this handler. `top_hypothesis` is None for an item that has no
+        # hypotheses at all.
+        if not new_hypothesis or not top_hypothesis:
+            return
+
         if new_hypothesis.get('backend') == "boundary_validator":
             return
-            
+
         data = top_hypothesis.get('data', {})
         size = data.get('size', 0)
         
