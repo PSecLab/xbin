@@ -36,7 +36,7 @@ plugins/_bases/bind/build.sh
 plugins/_bases/bind/rebuild.sh
 
 # 3. Check prerequisites for the tier you want.
-scripts/preflight.sh --tier smoke        # or --tier heavy once QEMU is built
+make preflight TIER=smoke        # or --tier heavy once QEMU is built
 
 # 4. Stage the test firmware into uploads/.
 plugins/_bases/bind/stage.sh             # or: make stage
@@ -66,9 +66,9 @@ remediation when it fails.
 ## Running
 
 ```bash
-scripts/e2e.sh smoke
-scripts/e2e.sh full            # needs ollama
-scripts/e2e.sh heavy           # needs QEMU in bind:latest
+make e2e TIER=smoke
+make e2e TIER=full            # needs ollama
+make e2e TIER=heavy           # needs QEMU in bind:latest
 ```
 
 ## Tool-specific notes
@@ -81,7 +81,7 @@ scripts/e2e.sh heavy           # needs QEMU in bind:latest
   `equation_recovery` producer. See [`KNOWN_ISSUES.md`](KNOWN_ISSUES.md) A and C.
 - **`symbolic_regression` posting nothing** usually means no qualifying
   hardware-float functions, or QEMU missing from the base
-  (`scripts/preflight.sh --tier heavy`).
+  (`make preflight TIER=heavy`).
 - **No ✓ / no Validator badge is expected** — this family ships no
   `is_validator` plugin. The ✓ appears only when `fid` and `ghidriff` post
   identical data and deduplicate. Look for the **`Ranker: bind_arbiter`** badge

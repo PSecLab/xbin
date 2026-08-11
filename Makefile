@@ -13,6 +13,10 @@ PY     := $(VENV)/bin/python
 # Every shared base-image bundle and every plugin-provided fixture stager.
 # $(sort) dedupes: plugins/*/*/ already covers plugins/_bases/<bundle>/, so
 # without it a bundle's stage.sh would be run twice.
+# Timestamped e2e logs land under the gitignored scratch dir rather than the repo
+# root -- no new top-level directories (see AGENTS.md).
+LOGDIR  := .xbin_scratch/logs
+
 BASES   := $(sort $(wildcard plugins/_bases/*/build.sh))
 STAGERS := $(sort $(wildcard plugins/*/*/stage.sh) $(wildcard plugins/_bases/*/stage.sh))
 
@@ -36,14 +40,21 @@ setup:
 	$(PY) -m pip install --upgrade pip
 	$(PY) -m pip install -e . pytest
 
+# Readiness is a pytest lane like everything else; one test per check.
+# Without the venv (fresh clone) fall back to the stdlib-only module directly.
 preflight:
-	scripts/preflight.sh --tier $(or $(TIER),smoke)
+	@if [ -x "$(PY)" ]; then \
+		$(PY) -m pytest -m preflight --e2e-tier $(or $(TIER),smoke); \
+	else \
+		echo "[!] no $(VENV) yet -- running the stdlib-only checker directly"; \
+		PYTHONPATH=src python3 -m xbin_orchestrator.preflight --tier $(or $(TIER),smoke); \
+	fi
 
 test:
 	$(PY) -m pytest
 
 tiers:
-	@$(PY) scripts/e2e_driver.py --list-tiers
+	@$(PY) tests/e2e_driver.py --list-tiers
 
 bases:
 	@if [ -z "$(BASES)" ]; then echo "no plugins/_bases/*/build.sh found"; fi
@@ -53,8 +64,12 @@ stage:
 	@if [ -z "$(STAGERS)" ]; then echo "no plugin stage.sh found"; fi
 	@for s in $(STAGERS); do echo "[*] $$s"; "$$s" || exit 1; done
 
-e2e:
-	scripts/e2e.sh $(or $(TIER),smoke)
+# Full stack through pytest, teeing a timestamped log (what scripts/e2e.sh used
+# to do). Preflight first so a missing base image fails fast with its remediation.
+e2e: preflight
+	@mkdir -p $(LOGDIR)
+	$(PY) -m pytest -m e2e --e2e-tier $(or $(TIER),smoke) 2>&1 \
+		| tee $(LOGDIR)/e2e_$(or $(TIER),smoke)_$$(date +%Y%m%d_%H%M%S).log
 
 clean:
 	-docker rm -f $$(docker ps -aq --filter name=xbin-worker-) 2>/dev/null || true

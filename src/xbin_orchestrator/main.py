@@ -180,7 +180,13 @@ def cleanup_stale_plugins():
 app = FastAPI(title="xbin Multi-Analysis Orchestrator", version="1.8.0")
 
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-os.makedirs(REFERENCE_DIR, exist_ok=True)
+
+# REFERENCE_DIR is deliberately NOT created. It is an optional, operator-curated
+# library of reference binaries; an installation that has none should not have an
+# empty directory conjured into its repo root on every startup. Both readers --
+# list_references() and the reference_name branch of upload_binary() -- treat its
+# absence as "no references available", so everything downstream degrades to the
+# plugin's own baked default.
 
 def _make_world_writable(path):
     """Create a host dir that worker containers can write to.

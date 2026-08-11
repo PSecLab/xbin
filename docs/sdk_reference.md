@@ -201,7 +201,7 @@ target = "/opt/mytool/job_outputs"   # absolute path inside the container
 | `name`, `category` | decorator, then directory names | Discovery precedence is **manifest > decorator > directory**. |
 | `weight` | `0.5` | Feeds `BACKEND_WEIGHTS`; an operator can override with `XBIN_BACKEND_WEIGHTS` (JSON). |
 | `shm_size` | `1g` (or `XBIN_DEFAULT_SHM_SIZE`) | `docker run --shm-size`. Docker's own default is 64M. |
-| `tiers` | none | Tier membership for `scripts/e2e_driver.py`. A tier's fleet, required categories and timeout are all derived from these. |
+| `tiers` | none | Tier membership for `tests/e2e_driver.py`. A tier's fleet, required categories and timeout are all derived from these. |
 | `e2e_timeout` | `1800` | A tier's timeout is the max over its member plugins. |
 | `[[mounts]]` | none | `cache` must be a plain directory name and `target` an absolute path, or the entry is rejected. |
 
@@ -213,7 +213,7 @@ The manifest is surfaced on `/api/v1/plugins/available` and through
 Two more things a plugin can contribute, both discovered by filename:
 
 - **`preflight_checks.py`** — expose `checks(tier, ctx) -> list[Check]` and
-  `scripts/preflight.py` will run it. `ctx` supplies `ctx.run`, `ctx.port_open`,
+  `xbin_orchestrator/preflight.py` will run it. `ctx` supplies `ctx.run`, `ctx.port_open`,
   `ctx.Check`, `ctx.PASS/FAIL/WARN` and `ctx.repo_root`, so you import nothing
   from the core. Give each check its own remediation string.
 - **`stage.sh`** — stages test fixtures into `uploads/`; `make stage` runs every

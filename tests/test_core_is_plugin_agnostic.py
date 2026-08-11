@@ -20,8 +20,15 @@ import pytest
 
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
-# Trees that must stay tool-agnostic.
-CORE_PATHS = ["src", "scripts", "docs", "Makefile", "docker-compose.yml", "pyproject.toml"]
+# Trees and files that must stay tool-agnostic.
+#
+# `tests/` as a whole is deliberately NOT here: a test legitimately names a
+# concrete backend when it constructs a scenario ("post as fid, then as bind_se,
+# assert the ordering"). What must stay generic is the shared harness that moved
+# in from scripts/ -- it derives its tiers from the manifests and must never
+# grow a tool name -- so that one file is listed explicitly.
+CORE_PATHS = ["src", "docs", "Makefile", "docker-compose.yml", "pyproject.toml",
+              "Dockerfile", os.path.join("tests", "e2e_driver.py")]
 
 # Names of specific analysis tools, base images and vendor stacks. A hit in a
 # core file means plugin knowledge has leaked out of plugins/.

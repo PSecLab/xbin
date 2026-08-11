@@ -213,7 +213,7 @@ non-obvious parts of the plugin/Docker system — see the
 **[Architecture Notes](docs/architecture.md)**.
 
 The repo is organised around one rule: **the core knows nothing about any
-specific analysis tool.** `src/`, `scripts/` and `docs/` are tool-agnostic;
+specific analysis tool.** `src/`, `tests/` and `docs/` are tool-agnostic;
 everything a tool needs — its build scripts, shared helpers, readiness checks,
 documentation and issue log — lives in its own directory under `plugins/`. The
 test suite enforces it.

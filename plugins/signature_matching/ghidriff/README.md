@@ -11,5 +11,5 @@ posts the matched identity per function address to `signature_matching`.
   reference baked into the base image.
 
 ```bash
-scripts/e2e.sh smoke
+make e2e TIER=smoke
 ```

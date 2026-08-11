@@ -14,7 +14,7 @@ practical one on large firmware.
 The QEMU requirement is what makes this the heavy tier. Verify it landed:
 
 ```bash
-scripts/preflight.sh --tier heavy      # or: plugins/_bases/bind/rebuild.sh
+make preflight TIER=heavy      # or: plugins/_bases/bind/rebuild.sh
 ```
 
 Posting nothing usually means no qualifying float functions in the target, or

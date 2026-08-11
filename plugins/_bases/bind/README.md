@@ -31,7 +31,7 @@ them directly.
 | `rebuild.sh` | Guarded rebuild + verify wrapper (kills stale instances, checks QEMU landed). |
 | `build.conf.example` | Template for `build.conf` (gitignored — it names your local Binary Ninja install). |
 | `bind_helpers.py` | Python helpers shared by all BIND workers; baked in at `/opt/xbin_bind`. |
-| `preflight_checks.py` | This family's readiness checks, discovered by `scripts/preflight.py`. |
+| `preflight_checks.py` | This family's readiness checks, discovered by `xbin_orchestrator/preflight.py`. |
 | `stage.sh` | Stages the test firmware into `uploads/`. |
 | `KNOWN_ISSUES.md` | Issue log for these tools. |
 | `TESTING.md` | Tier definitions and the BIND-specific end-to-end walkthrough. |
@@ -71,7 +71,7 @@ never push it.
 > ../pysindy/build.sh
 > ```
 >
-> `scripts/preflight.sh` catches this: the pysindy bundle's `preflight_checks.py`
+> `make preflight` catches this: the pysindy bundle's `preflight_checks.py`
 > compares the two images' build timestamps and verifies the inherited files are
 > actually present.
 

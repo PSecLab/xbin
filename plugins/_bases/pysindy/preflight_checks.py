@@ -1,6 +1,6 @@
 """Preflight checks owned by the pysindy base image.
 
-Discovered and run by `scripts/preflight.py`, which passes a context object
+Discovered and run by `xbin_orchestrator/preflight.py`, which passes a context object
 carrying the shared helpers -- so this module imports nothing from the core.
 
 The check that matters here is **staleness**. `pysindy:latest` is a derived

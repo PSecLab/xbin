@@ -14,5 +14,5 @@ onto one hypothesis, which is what produces the ✓ / "+N vouches" marker.
 
 ```bash
 plugins/_bases/bind/build.sh     # once
-scripts/e2e.sh smoke             # fid + ghidriff end to end
+make e2e TIER=smoke             # fid + ghidriff end to end
 ```

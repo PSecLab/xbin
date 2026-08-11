@@ -1,7 +1,7 @@
 # AGENTS.md — authoring plugins
 
 Everything an analysis tool needs lives in its own directory. If you find
-yourself editing `src/`, `scripts/`, `docs/` or the `Makefile` to make one plugin
+yourself editing `src/`, `tests/`, `docs/` or the `Makefile` to make one plugin
 work, that is the signal to add a generic declaration instead — see
 [the rule](../AGENTS.md#the-rule-that-shapes-this-repo).
 
@@ -23,6 +23,14 @@ plugins/
 the same category compete on the blackboard. Existing categories:
 `signature_matching`, `equation_recovery`, `cfg_generation`, `function_boundary`,
 `symbol_matching`. Add a new one by using it; nothing in the core enumerates them.
+
+**Keep a plugin flat.** The layout above is the whole of it — a worker, a
+Dockerfile, a manifest, a README, and for a prebuilt plugin its `build.sh` and
+`.xbin-prebuilt`. Do not add subdirectories to a plugin; if you are reaching for
+one, the material probably belongs in a `plugins/_bases/<image>/` bundle shared
+with the rest of its family, or in the tool's own upstream repo behind a
+submodule. And never add a directory to the repo root — see
+[the root-folder rule](../AGENTS.md#do-not-add-folders-to-the-repo-root).
 
 ## The three self-descriptions must agree
 
@@ -110,7 +118,7 @@ registering twice.
 
 ## Contributing checks and fixtures
 
-- `preflight_checks.py` — `checks(tier, ctx) -> list[Check]`, discovered and run by `scripts/preflight.py`. `ctx` supplies `ctx.run`, `ctx.port_open`, `ctx.Check`, `ctx.PASS/FAIL/WARN`, `ctx.repo_root`, so you import nothing from the core. Give every check its own remediation string.
+- `preflight_checks.py` — `checks(tier, ctx) -> list[Check]`, discovered and run by `xbin_orchestrator/preflight.py`. `ctx` supplies `ctx.run`, `ctx.port_open`, `ctx.Check`, `ctx.PASS/FAIL/WARN`, `ctx.repo_root`, so you import nothing from the core. Give every check its own remediation string.
 - `stage.sh` — stages test fixtures into `uploads/`. `make stage` runs every one it finds. Copy files rather than symlinking: `uploads/` is bind-mounted into containers and an external symlink dangles inside them.
 
 ## Gotchas

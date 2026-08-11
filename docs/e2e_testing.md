@@ -13,15 +13,15 @@ Three ways to test:
 | | What it exercises | Needs |
 |---|---|---|
 | **Automated fast lane** — `make test` | consensus math, REST API, plugin manifests, the layering guard (Docker-free) | venv + Redis (seconds) |
-| **Automated full stack** — `scripts/e2e.sh <tier>` | upload → real plugin containers → blackboard, with a summary | Docker + whatever the tier's plugins declare |
+| **Automated full stack** — `make e2e TIER=<tier>` | upload → real plugin containers → blackboard, with a summary | Docker + whatever the tier's plugins declare |
 | **Manual / visual** — the dashboard | what a human sees: fleet health, tables, per-function detail | a browser (+ an SSH tunnel if remote) |
 
 The pieces:
 
-- `scripts/preflight.py` / `.sh` — readiness checker. Runs the core checks (docker, redis, ports, deps) plus every `preflight_checks.py` a plugin contributes.
-- `scripts/e2e_driver.py` — full-stack driver. Derives its tiers from the plugin manifests.
-- `scripts/e2e.sh` + `Makefile` — glue.
-- `tests/` — the pytest suites (`pytest` = fast lane; `pytest -m e2e` = full stack).
+- `src/xbin_orchestrator/preflight.py` — the readiness engine. Runs the core checks (docker, redis, ports, deps) plus every `preflight_checks.py` a plugin contributes. Reached through `pytest -m preflight`, the `xbin-preflight` console script, or `make preflight`.
+- `tests/e2e_driver.py` — full-stack driver. Derives its tiers from the plugin manifests. Importable by the tests and runnable as a CLI.
+- `tests/` — every lane: `pytest` (fast, Docker-free), `pytest -m e2e` (full stack), `pytest -m preflight` (readiness).
+- `Makefile` — thin convenience wrappers over those.
 
 ---
 
@@ -43,7 +43,7 @@ edit.
 To see what the installed plugins actually define:
 
 ```bash
-make tiers                            # or: python scripts/e2e_driver.py --list-tiers
+make tiers                            # or: python tests/e2e_driver.py --list-tiers
 ```
 
 ---
@@ -79,7 +79,7 @@ source .venv/bin/activate
 make bases
 
 # 3. Sanity-check prerequisites for the tier you want.
-scripts/preflight.sh --tier smoke
+make preflight TIER=smoke
 
 # 4. Stage test fixtures into uploads/.
 make stage
@@ -177,7 +177,7 @@ Open **http://localhost:8000**.
 | Plugin card stuck **BUILDING** on first start | first `--no-cache` thin-layer build over a large base | Wait a few minutes; watch `docker ps -a`. Escalate only if it flips to ERROR. |
 | Plugin card shows **ERROR** (red line) | build/run failure | Click the card's **Logs**. "image ... missing" means its base image isn't built — run `make bases`. |
 | Build fails immediately | the plugin's base image is absent | `make bases`, or the plugin's own `build.sh` if it is `.xbin-prebuilt`. |
-| Empty results table after announcing | goal not checked / worker not HEALTHY / a service the plugin needs is down | Confirm the matching goal was checked or passed in the curl; confirm the card is **RUNNING + READY**; run `scripts/preflight.sh --tier <tier>`. |
+| Empty results table after announcing | goal not checked / worker not HEALTHY / a service the plugin needs is down | Confirm the matching goal was checked or passed in the curl; confirm the card is **RUNNING + READY**; run `make preflight TIER=<tier>`. |
 | A started plugin posts nothing | no qualifying input, or a missing runtime dependency | Check its **Logs**; the e2e driver also prints a **silent backends** line naming every plugin in the fleet that contributed nothing. |
 | Blackboard reset unexpectedly | the orchestrator restarted (`flushdb` on boot) | Don't restart mid-test; use **Clear Session** deliberately. |
 | UI file picker can't find the target | the browser reads *your* files, not the server's | Use the server-side `curl` announce, or copy the binary to your machine first. |
@@ -192,11 +192,11 @@ make test                      # == .venv/bin/pytest   (excludes -m e2e)
 
 # Full-stack, one command per tier (boots its own orchestrator, prints a summary):
 make tiers                     # what tiers exist
-scripts/e2e.sh <tier>
+make e2e TIER=<tier>
 
 # Or drive an orchestrator you're already watching in the dashboard:
 xbin-orchestrator --no-browser &                     # (in tmux)
-python scripts/e2e_driver.py --tier smoke --attach   # results appear live in the browser
+python tests/e2e_driver.py --tier smoke --attach   # results appear live in the browser
 
 # As a pytest (against the session orchestrator; opt-in):
 pytest -m e2e                  # smoke tier; XBIN_E2E_TIER=<tier> to change

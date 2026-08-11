@@ -28,9 +28,8 @@ See [`README.md`](README.md) for the introduction and
 
 ```
 src/           orchestrator, SDK, libxbin          -- tool-agnostic
-scripts/       preflight + e2e harness             -- tool-agnostic
+tests/         pytest suites + the e2e driver      -- tool-agnostic
 docs/          framework documentation             -- tool-agnostic
-tests/         pytest suites                       -- tool-agnostic
 plugins/       every analysis tool, self-contained
   _bases/      shared base-image bundles (build scripts, shared helpers, docs)
   <category>/<tool>/   one plugin: worker, Dockerfile, xbin-plugin.toml, README
@@ -38,10 +37,36 @@ submodules/    third-party trees consumed by plugin base images
 examples/      runnable demos, incl. a template plugin
 ```
 
+Plus, all gitignored: `uploads/` and `cache/` (runtime state, overridable via
+`XBIN_UPLOAD_DIR` / `XBIN_CACHE_DIR`), `.xbin_scratch/` (build staging and e2e
+logs), and `__pycache__/`. `references/` is an optional operator-curated library
+of reference binaries and is **not** created for you — everything degrades to the
+plugin's own default when it is absent.
+
+The only files at the root are `README.md`, `AGENTS.md`, `Makefile`,
+`pyproject.toml`, `docker-compose.yml`, `Dockerfile`, and `conftest.py` (pytest
+requires option declarations in the rootdir conftest).
+
+### Do not add folders to the repo root
+
+**The top level above is fixed.** Do not create new root directories. Anything
+new belongs inside one of them, or -- only where convention genuinely demands a
+root file, as with `Dockerfile` or `Makefile` -- as a single file.
+
+Be frugal inside plugin directories too: a plugin is a flat handful of files
+(worker, `Dockerfile`, `xbin-plugin.toml`, `README.md`), not a tree. A base-image
+bundle under `plugins/_bases/<image>/` is likewise flat.
+
+The pull is always to make "just one folder" for a new concern. Resist it: every
+root directory is a thing every future reader has to understand and every
+extraction has to account for. `scripts/` is the cautionary tale -- it accreted
+test infrastructure that already belonged in `tests/` and a readiness checker
+that belonged in the package, and had to be dismantled.
+
 ## The rule that shapes this repo
 
 **The core knows nothing about any specific analysis tool.** No plugin name,
-image name, container path, or vendor stack may appear in `src/`, `scripts/`,
+image name, container path, or vendor stack may appear in `src/`, `tests/`,
 `docs/`, the `Makefile`, `docker-compose.yml`, or `pyproject.toml`. Everything a
 plugin needs lives in the plugin's own directory.
 
@@ -66,6 +91,7 @@ a special case. Existing declarations: consensus `weight`, cache `[[mounts]]`,
 ```bash
 make setup                            # .venv + pip install -e . pytest (needs python >= 3.11)
 make test                             # fast Docker-free lane
+make preflight TIER=smoke             # readiness checks (Docker, Redis, base images, services)
 make tiers                            # e2e tiers the installed plugins define
 make bases                            # build every plugins/_bases/*/ base image
 make stage                            # run every plugin's stage.sh (fixtures -> uploads/)
@@ -77,7 +103,10 @@ xbin-orchestrator --plugin-dir PATH   # out-of-tree plugin collection (repeatabl
 xbin-orchestrator --plugin PATH[:category]   # single external plugin (repeatable)
 
 pytest tests/test_blackboard.py::test_analyzer_submission -v   # single test
-pytest -m e2e                         # full stack (opt-in)
+pytest -m e2e --e2e-tier full         # full stack (opt-in)
+pytest -m preflight                   # readiness, one test per check (opt-in)
+python tests/e2e_driver.py --list-tiers            # what the manifests define
+python tests/e2e_driver.py --tier smoke --attach   # drive a live dashboard
 ```
 
 Tests need a reachable Redis on `localhost:6379`; `conftest.py` boots a real
