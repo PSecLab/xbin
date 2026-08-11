@@ -24,6 +24,7 @@ dependencies = [
 
 [project.scripts]
 xbin-orchestrator = "xbin_orchestrator.main:main"
+xbin-preflight = "xbin_orchestrator.preflight:main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
@@ -33,10 +34,12 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-# Default lane is Docker-free: exclude the full-stack e2e test. Run it with
-# `pytest -m e2e` (a user-supplied -m overrides this default).
-addopts = "-ra -m 'not e2e'"
+# Default lane is Docker-free: exclude the full-stack e2e test and the readiness
+# checks, both of which need Docker and a live Redis. Run them with `pytest -m
+# e2e` / `pytest -m preflight` (a user-supplied -m overrides this default).
+addopts = "-ra -m 'not e2e and not preflight'"
 markers = [
     "e2e: full-stack pipeline; needs Docker plus whatever base images and services the installed plugins declare. Opt-in.",
+    "preflight: deployment readiness (Docker, Redis, base images, services). Opt-in.",
     "slow: long-running (minutes to hours).",
 ]

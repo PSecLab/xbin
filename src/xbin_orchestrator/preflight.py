@@ -20,8 +20,16 @@ and this runner discovers and calls it. `ctx` hands over the helpers
 so a plugin check needs no imports of its own. Each check carries its own
 remediation string, so the fix travels with the tool instead of living here.
 
-Usage:
-  python3 scripts/preflight.py [--tier TIER] [--attach]
+Three ways in, all running the same `run_checks()`:
+
+  pytest -m preflight --e2e-tier heavy     # the standard route
+  xbin-preflight --tier heavy              # console script, after `pip install -e .`
+  PYTHONPATH=src python3 -m xbin_orchestrator.preflight --tier heavy
+
+The third exists because this module is **stdlib-only on purpose**: it has to be
+able to run on a bare `python3` in a fresh clone, where reporting "you have no
+venv and no pytest" is one of its jobs. Keep it dependency-free -- adding an
+import from the rest of the package, or anything third-party, breaks that.
 """
 from __future__ import annotations
 
@@ -34,7 +42,9 @@ import subprocess
 import sys
 import traceback
 
-REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+# src/xbin_orchestrator/ -> repo root is two levels up. Mirrors the same
+# computation in main.py, and keeps the plugin walk working from a checkout.
+REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 PLUGINS_DIR = os.environ.get("XBIN_PLUGINS_DIR") or os.path.join(REPO_ROOT, "plugins")
 PLUGIN_CHECKS_FILE = "preflight_checks.py"
 
@@ -152,6 +162,23 @@ def discover_plugin_checks(tier, plugins_dir=PLUGINS_DIR):
     return results
 
 
+def run_checks(tier="smoke", attach=False):
+    """Every readiness check for `tier`: the core ones, then each plugin's.
+
+    Importable so the pytest surface (tests/test_preflight.py) reports one test
+    per check without re-implementing any of this, and so the table printer in
+    main() has no logic of its own.
+    """
+    checks = [
+        check_docker(),
+        check_redis(),
+        check_ports(attach),
+        check_python_deps(),
+    ]
+    checks.extend(discover_plugin_checks(tier))
+    return checks
+
+
 def main():
     ap = argparse.ArgumentParser(description="xbin preflight checker")
     # Tiers are defined by the installed plugins (xbin-plugin.toml `tiers`), so
@@ -161,13 +188,7 @@ def main():
     ap.add_argument("--attach", action="store_true")
     args = ap.parse_args()
 
-    checks = [
-        check_docker(),
-        check_redis(),
-        check_ports(args.attach),
-        check_python_deps(),
-    ]
-    checks.extend(discover_plugin_checks(args.tier))
+    checks = run_checks(args.tier, args.attach)
 
     print(f"\nxbin preflight  (tier={args.tier}{', attach' if args.attach else ''})")
     print("-" * 72)
