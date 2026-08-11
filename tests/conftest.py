@@ -5,18 +5,39 @@ import redis
 import os
 import sys
 
-# Ensure both `src` (SDK) and `scripts` (shared E2E helpers) are importable.
+# `src` holds the SDK and the orchestrator package; it is not installed in every
+# environment the tests run in, so put it on the path explicitly. The e2e helpers
+# now live in this package (tests/e2e_driver.py) and need no path juggling.
 _REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.append(os.path.join(_REPO_ROOT, "src"))
-sys.path.append(os.path.join(_REPO_ROOT, "scripts"))
 
-from e2e_driver import (  # single readiness gate (see scripts/e2e_driver.py)
+from tests.e2e_driver import (  # single readiness gate (see tests/e2e_driver.py)
     GRPC_PORT,
     REST_BASE,
     REST_PORT,
     _port_open,
     wait_for_ready,
 )
+
+
+@pytest.fixture(scope="session")
+def e2e_options(request):
+    """The `--e2e-*` options as a dict of run_tier() keyword arguments.
+
+    The options themselves are declared in the repo-root conftest.py -- see the
+    note there for why they cannot live in this file."""
+    opt = request.config.getoption
+    tier = opt("--e2e-tier") or os.environ.get("XBIN_E2E_TIER") or "smoke"
+    return {
+        "tier": tier,
+        "binary": opt("--e2e-binary"),
+        "reference": opt("--e2e-reference"),
+        # Always attach: conftest already booted the session orchestrator, so the
+        # driver must drive that one rather than start a second.
+        "attach": True,
+        "build_timeout": opt("--e2e-build-timeout"),
+        "result_timeout": opt("--e2e-result-timeout"),
+    }
 
 
 @pytest.fixture(scope="session", autouse=True)

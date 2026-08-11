@@ -19,9 +19,9 @@ So adding a plugin to a tier is a one-line manifest edit, and a deployment with
 entirely different tools gets working tiers for free.
 
 Usage:
-  python scripts/e2e_driver.py --tier smoke         # boot orchestrator, run, tear down
-  python scripts/e2e_driver.py --tier full --attach # use an already-running orchestrator
-  python scripts/e2e_driver.py --list-tiers         # show what the manifests define
+  python tests/e2e_driver.py --tier smoke         # boot orchestrator, run, tear down
+  python tests/e2e_driver.py --tier full --attach # use an already-running orchestrator
+  python tests/e2e_driver.py --list-tiers         # show what the manifests define
 
 This module is also imported by tests/conftest.py (for wait_for_ready) and
 tests/test_e2e_pipeline.py (run_tier), so keep the importable API stable.
@@ -444,6 +444,16 @@ def run_tier(tier: str, attach: bool = False, binary: str | None = None,
 
         if not os.path.exists(binary):
             log(f"[x] test binary not found: {binary}")
+            return 2
+
+        # Validate the reference here rather than letting open() raise a bare
+        # Errno 2 from inside the multipart upload. references/ is optional and
+        # may not exist at all, so a path that was explicitly asked for and is
+        # missing deserves a clear message -- silently dropping it would change
+        # what the run actually tested.
+        if reference and not os.path.exists(reference):
+            log(f"[x] reference binary not found: {reference}")
+            log("    references/ is optional; omit --reference to use the plugin's own default")
             return 2
 
         start_plugins(client, cfg["plugins"])
